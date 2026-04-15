@@ -1,0 +1,12 @@
+target/
+*.class
+*.jar
+.idea/
+*.iml
+.vscode/
+__pycache__/
+*.pyc
+.venv/
+.env
+minio-data/
+kafka-data/
