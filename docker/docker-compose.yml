@@ -1,7 +1,6 @@
 # IoT Lakehouse local stack — skeleton.
 # Services are defined minimally; tune versions, volumes, networks before first run.
 # Start order: zookeeper -> kafka -> schema-registry -> hivemq -> minio -> nessie -> flink
-version: "3.8"
 
 networks:
   lakehouse:
@@ -10,6 +9,8 @@ networks:
 volumes:
   minio-data:
   kafka-data:
+  zk-data:
+  zk-log:
 
 services:
 
@@ -18,6 +19,9 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zk-data:/var/lib/zookeeper/data
+      - zk-log:/var/lib/zookeeper/log
     networks: [lakehouse]
 
   kafka:
@@ -51,7 +55,7 @@ services:
     image: hivemq/hivemq-ce:latest
     ports:
       - "1883:1883"   # MQTT
-      - "8080:8080"   # HiveMQ control center
+      - "8000:8000"   # MQTT over WebSocket (HiveMQ CE has no HTTP control center — that's Enterprise only)
     networks: [lakehouse]
 
   minio:
@@ -68,7 +72,7 @@ services:
     networks: [lakehouse]
 
   nessie:
-    image: projectnessie/nessie:0.99.0
+    image: ghcr.io/projectnessie/nessie:0.99.0
     ports:
       - "19120:19120"
     networks: [lakehouse]
