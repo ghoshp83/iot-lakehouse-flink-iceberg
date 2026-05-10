@@ -1,0 +1,15 @@
+{
+  "namespace": "com.github.ghoshp83.iotlakehouse.avro",
+  "type": "record",
+  "name": "Telemetry",
+  "doc": "IoT device reading. Schema is the contract between the MQTT->Kafka bridge and the Flink ingest job.",
+  "fields": [
+    {"name": "device_id", "type": "string"},
+    {"name": "site_id", "type": "string"},
+    {"name": "ts", "type": {"type": "long", "logicalType": "timestamp-millis"}, "doc": "epoch millis"},
+    {"name": "temperature_c", "type": "double"},
+    {"name": "humidity_pct", "type": "double"},
+    {"name": "pressure_hpa", "type": "double"},
+    {"name": "vibration_g", "type": "double"}
+  ]
+}

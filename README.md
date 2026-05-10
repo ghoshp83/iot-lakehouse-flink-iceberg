@@ -1,66 +1,74 @@
 # iot-lakehouse-flink-iceberg
 
-> **Status: 🚧 WIP — M2 of 6 complete.** End-to-end pipeline in progress; the Flink → Iceberg sink (M3) lands next. Treat this as a build-in-public — see [docs/progress.md](docs/progress.md) for the live milestone tracker.
+> **Status: 🚧 WIP — M3 half-pipeline complete (M2 + Avro/Flink read path).** The Flink → Iceberg *sink* swap is the next slice. Treat this as a build-in-public — see [docs/progress.md](docs/progress.md) for the live milestone tracker.
 
-End-to-end IoT lakehouse:
+End-to-end IoT lakehouse on the modern stack: **Kafka 4 (KRaft) · Flink 2.2 · Java 17 · Iceberg 1.10 · Confluent Platform 8.2**.
 
 ```
-  ┌─────────┐   MQTT    ┌────────┐        ┌───────┐   Iceberg   ┌──────────┐   SQL   ┌─────────────┐
-  │ sensors │ ────────▶ │ HiveMQ │ ─────▶ │ Kafka │ ──────────▶ │  S3 /    │ ──────▶ │ Snowflake / │
-  └─────────┘           │ broker │        └───────┘             │  MinIO   │         │   Trino     │
-                        └────────┘            │                 │ Iceberg  │         └─────────────┘
-                                              ▼                 └──────────┘
-                                         ┌────────┐                   ▲
-                                         │ Flink  │───────────────────┘
-                                         │  jobs  │
-                                         └────────┘
+  ┌─────────┐  MQTT    ┌────────┐    ┌────────┐    ┌───────┐    ┌──────────┐    ┌──────────┐    ┌─────────────┐
+  │ sensors │ ───────▶ │ HiveMQ │ ─▶ │ bridge │ ─▶ │ Kafka │ ─▶ │  Flink   │ ─▶ │  S3 /    │ ─▶ │ Snowflake / │
+  └─────────┘          │ broker │    │ Avro+SR│    │ KRaft │    │  jobs    │    │  MinIO   │    │   Trino     │
+                       └────────┘    └────────┘    └───┬───┘    └──────────┘    │ Iceberg  │    └─────────────┘
+                                                       │             ▲          └──────────┘
+                                                       ▼             │
+                                                  ┌─────────────────────┐
+                                                  │  Schema Registry    │
+                                                  └─────────────────────┘
 ```
 
 | Stage | Status | Notes |
 |---|---|---|
-| M1 — Local docker-compose stack | ✅ 2026-05-01 | All 8 services healthy on first boot |
+| M1 — Local docker-compose stack | ✅ 2026-05-01 | All 7 services healthy (ZK dropped — Kafka 4 KRaft) |
 | M2 — MQTT simulator → Kafka | ✅ 2026-05-06 | 1494 msgs lossless across 3 partitions, keyed by `device_id` |
-| M3 — Flink Kafka → Iceberg sink (MinIO) | ⏳ next | Java Flink job, Avro + Schema Registry |
+| M3a — Flink Kafka (Avro/SR) → print | ✅ 2026-05-10 | 30,150 records deserialized + printed; proves the Avro read path |
+| M3 — Flink Kafka → Iceberg sink (MinIO) | 🟡 in progress | Iceberg + Nessie deps already in pom; sink swap is the next slice |
 | M4 — Windowed aggregations | ⏳ | Per-device rolling stats |
 | M5 — Snowflake external tables over Iceberg | ⏳ | Or Trino — choice deferred to M5 |
 | M6 — Prometheus + Grafana + CI + docs polish | ⏳ | |
 
-## Run the M2 pipeline locally
+## Run the M3 half-pipeline locally
 
 ```bash
-# 1. Stack up
+# 1. Stack up (Kafka KRaft self-bootstraps; no ZooKeeper)
 cd docker && docker compose up -d
 
-# 2. Wait for Kafka, then create the topic
-docker exec docker-kafka-1 kafka-topics \
-  --bootstrap-server kafka:29092 --create --if-not-exists \
+# 2. Create the topic
+docker exec kafka kafka-topics \
+  --bootstrap-server localhost:9092 --create --if-not-exists \
   --topic iot.telemetry --partitions 3 --replication-factor 1
 
-# 3. Install Python deps
+# 3. Build the Flink fat jar (Java 17 + Maven)
+cd ../flink-jobs && MAVEN_OPTS="-Xmx3g" mvn clean package -DskipTests
+
+# 4. Install Python deps for the simulator + Avro bridge
 cd ../sample-data && pip install -r requirements.txt
 
-# 4. In one shell — the bridge (MQTT subscriber → Kafka producer)
-python3 mqtt_kafka_bridge.py
-
-# 5. In another shell — the simulator (9 devices × 3 sites)
+# 5. Start the simulator and bridge (two terminals)
 python3 sensor_simulator.py --rate-hz 5
+python3 mqtt_kafka_bridge.py    # publishes Avro to Schema Registry
 
-# 6. Verify in a third shell
-docker exec docker-kafka-1 kafka-console-consumer \
-  --bootstrap-server kafka:29092 --topic iot.telemetry \
-  --from-beginning --max-messages 5 --property print.key=true
+# 6. Submit the Flink job
+docker cp ../flink-jobs/target/iot-lakehouse-flink-0.1.0-SNAPSHOT.jar \
+  docker-flink-jobmanager-1:/tmp/job.jar
+docker exec docker-flink-jobmanager-1 flink run -d /tmp/job.jar
+
+# 7. Watch the print sink
+docker logs -f docker-flink-taskmanager-1 | grep "device="
 ```
 
-You should see JSON payloads keyed by `device_id`, e.g.
-`site-london-dev-00 :: {"device_id": "...", "temperature_c": 22.1, ...}`.
+Expected output, one line per Avro record:
+```
+device=site-london-dev-00 site=site-london ts=2026-05-10T19:04:50.576Z temp=22.10 hum=51.30 pres=1012.40 vib=0.0820
+```
 
 ## Layout
 
 | Dir | Purpose |
 |---|---|
-| `docker/` | docker-compose stack: HiveMQ, Kafka, Schema Registry, MinIO, Nessie, Flink JM+TM |
-| `sample-data/` | Python MQTT sensor simulator + MQTT→Kafka bridge (M2 stand-in; M3 replaces the bridge with Flink) |
-| `flink-jobs/` | Java Flink jobs — to be filled in at M3 |
+| `docker/` | docker-compose stack: HiveMQ, Kafka (KRaft), Schema Registry, MinIO, Nessie, Flink JM+TM |
+| `sample-data/` | Python MQTT sensor simulator + Avro bridge (Confluent SR) — bridges stay because HiveMQ CE has no native Kafka connector |
+| `flink-jobs/` | Maven module for Java Flink jobs. `KafkaToPrintJob` (M3a) reads Avro from SR; the Iceberg sink replaces the print sink at M3 final |
+| `flink-jobs/src/main/avro/telemetry.avsc` | Single source of truth for the on-the-wire schema — both the bridge and the Flink job read it |
 | `docs/decisions.md` | Running log of non-obvious choices |
 | `docs/progress.md` | Live milestone tracker |
 

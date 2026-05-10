@@ -1,6 +1,7 @@
-# IoT Lakehouse local stack — skeleton.
-# Services are defined minimally; tune versions, volumes, networks before first run.
-# Start order: zookeeper -> kafka -> schema-registry -> hivemq -> minio -> nessie -> flink
+# IoT Lakehouse local stack.
+# Kafka 4 (KRaft, no Zookeeper) + Schema Registry 8.2 (Confluent Platform 8.2 / Apache Kafka 4.2)
+# Flink 2.2 on Java 17. HiveMQ CE for MQTT. MinIO for S3-compatible storage. Nessie as the Iceberg catalog.
+# Start order: kafka (KRaft self-bootstraps) -> schema-registry -> hivemq -> minio -> nessie -> flink
 
 networks:
   lakehouse:
@@ -9,39 +10,38 @@ networks:
 volumes:
   minio-data:
   kafka-data:
-  zk-data:
-  zk-log:
 
 services:
 
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.6.1
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    volumes:
-      - zk-data:/var/lib/zookeeper/data
-      - zk-log:/var/lib/zookeeper/log
-    networks: [lakehouse]
-
   kafka:
-    image: confluentinc/cp-kafka:7.6.1
-    depends_on: [zookeeper]
+    image: confluentinc/cp-kafka:8.2.0
+    hostname: kafka
+    container_name: kafka
     ports:
       - "9092:9092"
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # KRaft single-node combined controller+broker.
+      # CLUSTER_ID must be a 22-char base64 string (16 random bytes); pinning it
+      # makes the kafka-data volume durable across restarts.
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
     volumes:
       - kafka-data:/var/lib/kafka/data
     networks: [lakehouse]
 
   schema-registry:
-    image: confluentinc/cp-schema-registry:7.6.1
+    image: confluentinc/cp-schema-registry:8.2.0
     depends_on: [kafka]
     ports:
       - "8081:8081"
@@ -78,7 +78,7 @@ services:
     networks: [lakehouse]
 
   flink-jobmanager:
-    image: flink:1.18-scala_2.12-java11
+    image: flink:2.2.0-java17
     command: jobmanager
     ports:
       - "8082:8081"   # Flink UI (remapped — HiveMQ uses 8080, SR uses 8081)
@@ -89,7 +89,7 @@ services:
     networks: [lakehouse]
 
   flink-taskmanager:
-    image: flink:1.18-scala_2.12-java11
+    image: flink:2.2.0-java17
     command: taskmanager
     depends_on: [flink-jobmanager]
     environment:
