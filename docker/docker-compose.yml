@@ -71,6 +71,20 @@ services:
       - minio-data:/data
     networks: [lakehouse]
 
+  # One-shot bucket creation. Iceberg sink writes to s3://warehouse/, so the
+  # bucket must exist before the Flink job runs. Idempotent — `mc mb -p` no-ops if present.
+  minio-init:
+    image: minio/mc:latest
+    depends_on: [minio]
+    entrypoint: >
+      /bin/sh -c "
+        until mc alias set local http://minio:9000 admin admin12345; do sleep 1; done;
+        mc mb -p local/warehouse || true;
+        echo 'warehouse bucket ready';
+      "
+    networks: [lakehouse]
+    restart: "no"
+
   nessie:
     image: ghcr.io/projectnessie/nessie:0.99.0
     ports:

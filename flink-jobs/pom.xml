@@ -48,6 +48,22 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- Flink Table API: used for RowData/GenericRowData/StringData/TimestampData when feeding the
+             Iceberg sink. flink:2.2.0-java17 image ships flink-table-runtime + flink-table-api-java-uber
+             in /opt/flink/lib, so scope=provided keeps them out of the fat jar. -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-table-api-java-bridge</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-table-runtime</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
         <!-- Kafka source/sink: external connector, shaded into the fat jar -->
         <dependency>
             <groupId>org.apache.flink</groupId>
@@ -72,7 +88,9 @@
             <version>${avro.version}</version>
         </dependency>
 
-        <!-- Iceberg sink (used in next M3 slice; included now to surface dep conflicts early) -->
+        <!-- Iceberg sink. iceberg-flink-runtime is the Flink-2.0-ABI uber jar (RowData->Parquet writer +
+             FlinkSink). iceberg-nessie provides the Nessie catalog impl. iceberg-aws-bundle ships
+             S3FileIO + the AWS SDK v2 client used to talk to MinIO over the S3 API. -->
         <dependency>
             <groupId>org.apache.iceberg</groupId>
             <artifactId>iceberg-flink-runtime-2.0</artifactId>
@@ -87,6 +105,33 @@
             <groupId>org.apache.iceberg</groupId>
             <artifactId>iceberg-aws-bundle</artifactId>
             <version>${iceberg.version}</version>
+        </dependency>
+
+        <!-- Hadoop Configuration is required by Iceberg's CatalogLoader signature even though our
+             catalog (Nessie + S3FileIO) never touches HDFS. hadoop-common needs hadoop-shaded-guava
+             (Interners) plus its Woodstox + stax2 static-init deps. We exclude only the heaviest
+             transitives that aren't reachable: HDFS, YARN, MapReduce, Kerberos servers, Jersey, etc. -->
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-common</artifactId>
+            <version>3.4.1</version>
+            <exclusions>
+                <exclusion><groupId>org.apache.hadoop</groupId><artifactId>hadoop-auth</artifactId></exclusion>
+                <exclusion><groupId>org.apache.zookeeper</groupId><artifactId>zookeeper</artifactId></exclusion>
+                <exclusion><groupId>org.eclipse.jetty</groupId><artifactId>*</artifactId></exclusion>
+                <exclusion><groupId>org.glassfish.jersey.core</groupId><artifactId>*</artifactId></exclusion>
+                <exclusion><groupId>org.glassfish.jersey.containers</groupId><artifactId>*</artifactId></exclusion>
+                <exclusion><groupId>com.sun.jersey</groupId><artifactId>*</artifactId></exclusion>
+                <exclusion><groupId>javax.servlet</groupId><artifactId>*</artifactId></exclusion>
+                <exclusion><groupId>org.apache.curator</groupId><artifactId>*</artifactId></exclusion>
+                <exclusion><groupId>org.apache.kerby</groupId><artifactId>*</artifactId></exclusion>
+                <exclusion><groupId>org.apache.commons</groupId><artifactId>commons-math3</artifactId></exclusion>
+                <exclusion><groupId>com.google.protobuf</groupId><artifactId>protobuf-java</artifactId></exclusion>
+                <exclusion><groupId>com.jcraft</groupId><artifactId>jsch</artifactId></exclusion>
+                <exclusion><groupId>com.google.re2j</groupId><artifactId>re2j</artifactId></exclusion>
+                <exclusion><groupId>dnsjava</groupId><artifactId>dnsjava</artifactId></exclusion>
+                <exclusion><groupId>org.apache.avro</groupId><artifactId>avro</artifactId></exclusion>
+            </exclusions>
         </dependency>
 
         <!-- Logging: Flink container ships log4j2; provided so it isn't shaded -->
@@ -164,7 +209,7 @@
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>com.github.ghoshp83.iotlakehouse.KafkaToPrintJob</mainClass>
+                                    <mainClass>com.github.ghoshp83.iotlakehouse.KafkaToIcebergJob</mainClass>
                                 </transformer>
                             </transformers>
                         </configuration>
