@@ -1,50 +1,66 @@
-# iot-lakehouse-flink-iceberg
+# IoT Lakehouse — Flink + Iceberg
 
-End-to-end IoT lakehouse on the modern stack: **Kafka 4 (KRaft) · Flink 2.2 · Java 17 · Iceberg 1.10 · Confluent Platform 8.2 · Nessie · MinIO**. Runs locally with one `docker compose up`; M3 ships a real, queryable Iceberg table.
+End-to-end streaming lakehouse for IoT telemetry: MQTT sensors feed Kafka via a Schema Registry bridge, Flink streams the data into Apache Iceberg tables on S3-compatible storage, queryable from any SQL engine.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Devices
+        S[IoT Sensors<br/>9 devices × 3 sites]
+    end
+
+    subgraph Ingest
+        HMQ[HiveMQ CE<br/>MQTT 1883]
+        BR[Python Bridge<br/>Avro + Schema Registry]
+    end
+
+    subgraph Streaming
+        K[Kafka 4<br/>KRaft · 3 partitions]
+        SR[Schema Registry<br/>Confluent 8.2]
+        FL[Flink 2.2<br/>Java 17]
+    end
+
+    subgraph Lakehouse
+        ICE[Iceberg 1.10<br/>Parquet files]
+        NES[Nessie Catalog<br/>Git-like branching]
+        MINIO[MinIO<br/>S3-compatible]
+    end
+
+    S -->|MQTT| HMQ
+    HMQ -->|subscribe| BR
+    BR -->|Avro + key| K
+    K --- SR
+    K -->|consume| FL
+    FL -->|checkpoint commit| ICE
+    ICE --- NES
+    ICE -->|Parquet| MINIO
 ```
-  ┌─────────┐  MQTT    ┌────────┐    ┌────────┐    ┌───────┐    ┌──────────┐    ┌──────────┐    ┌─────────────┐
-  │ sensors │ ───────▶ │ HiveMQ │ ─▶ │ bridge │ ─▶ │ Kafka │ ─▶ │  Flink   │ ─▶ │  MinIO   │ ─▶ │ Snowflake / │
-  └─────────┘          │ broker │    │ Avro+SR│    │ KRaft │    │  jobs    │    │ Iceberg  │    │   Trino     │
-                       └────────┘    └────────┘    └───┬───┘    └────┬─────┘    └─────┬────┘    └─────────────┘
-                                                      │             │                │
-                                                      ▼             ▼                ▼
-                                                  ┌──────────────┐ ┌──────────┐
-                                                  │   Schema     │ │  Nessie  │
-                                                  │   Registry   │ │  catalog │
-                                                  └──────────────┘ └──────────┘
-```
 
-| Stage | Status | Notes |
-|---|---|---|
-| M1 — Local docker-compose stack | ✅ 2026-05-01 | All services healthy (ZK dropped — Kafka 4 KRaft) |
-| M2 — MQTT simulator → Kafka | ✅ 2026-05-06 | 1494 msgs lossless across 3 partitions, keyed by `device_id` |
-| M3a — Flink Kafka (Avro/SR) → print | ✅ 2026-05-10 | 30,150 records deserialized; proves the Avro read path |
-| M3 — Flink Kafka → Iceberg on MinIO | ✅ 2026-05-11 | **57,042 Kafka offsets = 57,042 Iceberg rows**, exact match across `kafka-get-offsets`, Iceberg snapshot `total-records`, and `pyarrow` row count |
-| M4 — Windowed aggregations | ⏳ | Per-device rolling stats into a second Iceberg table |
-| M5 — Snowflake external tables over Iceberg | ⏳ | Or Trino — choice deferred to M5 |
-| M6 — Prometheus + Grafana + CI + jar slimming | ⏳ | |
+**Data flow:** Simulated IoT devices publish JSON readings over MQTT to HiveMQ. A Python bridge subscribes, serializes to Avro via Schema Registry, and produces to Kafka (keyed by `device_id`). Flink consumes the Avro stream, maps records to Iceberg RowData, and sinks Parquet files to MinIO through the Nessie catalog. Every Flink checkpoint triggers an Iceberg commit — the table is always consistent.
 
 ## Run the full pipeline locally
 
+**Prerequisites:** Docker (with Compose), Java 17, Maven, Python 3.10+.
+
 ```bash
-# 1. Stack up (Kafka KRaft self-bootstraps; minio-init creates the warehouse bucket idempotently)
+# 1. Start the stack (Kafka KRaft self-bootstraps; minio-init creates the warehouse bucket)
 cd docker && docker compose up -d
 
-# 2. Create the topic
+# 2. Create the Kafka topic
 docker exec kafka kafka-topics \
   --bootstrap-server localhost:9092 --create --if-not-exists \
   --topic iot.telemetry --partitions 3 --replication-factor 1
 
-# 3. Build the Flink fat jar (Java 17 + Maven; takes ~12s + ~3g heap)
+# 3. Build the Flink fat jar
 cd ../flink-jobs && MAVEN_OPTS="-Xmx3g" mvn clean package -DskipTests
 
-# 4. Install Python deps for the simulator + Avro bridge
+# 4. Install Python dependencies
 cd ../sample-data && pip install -r requirements.txt
 
-# 5. Start the simulator and the bridge (two terminals)
+# 5. Start the simulator and bridge (two terminals)
 python3 sensor_simulator.py --rate-hz 5
-python3 mqtt_kafka_bridge.py    # publishes Avro to Schema Registry
+python3 mqtt_kafka_bridge.py
 
 # 6. Submit the Flink job
 docker cp ../flink-jobs/target/iot-lakehouse-flink-0.1.0-SNAPSHOT.jar \
@@ -52,45 +68,76 @@ docker cp ../flink-jobs/target/iot-lakehouse-flink-0.1.0-SNAPSHOT.jar \
 docker exec docker-flink-jobmanager-1 flink run -d /tmp/job.jar
 ```
 
-After ~30 s the first checkpoint commits and the Iceberg table starts filling on MinIO:
+After ~30 seconds the first checkpoint commits and Iceberg rows appear on MinIO:
 
 ```bash
-# Browse the table layout (data files + manifests + metadata json under iot/telemetry_<uuid>/)
+# Verify Kafka offsets
+docker exec kafka kafka-get-offsets \
+  --bootstrap-server localhost:9092 --topic iot.telemetry
+
+# Browse Iceberg table files on MinIO
 docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
   "mc alias set local http://minio:9000 admin admin12345 >/dev/null && \
    mc ls --recursive local/warehouse/iot/"
 ```
 
-Verify the round-trip is lossless:
+## Why this stack
 
-```bash
-# Kafka offsets
-docker exec kafka kafka-get-offsets --bootstrap-server localhost:9092 --topic iot.telemetry
-# iot.telemetry:0:12676
-# iot.telemetry:1:6338
-# iot.telemetry:2:38028  → 57,042 total
+| Choice | Rationale |
+|--------|-----------|
+| **Kafka 4 (KRaft)** | No ZooKeeper dependency — single-process combined controller+broker. Simpler ops, matches the direction all new Kafka deployments are heading. |
+| **Confluent Platform 8.2** | Provides Schema Registry + production-grade Kafka images. Avro schema is the single contract between the Python bridge and the Java Flink job. |
+| **Flink 2.2 on Java 17** | Long Term Support release. Native Iceberg sink with checkpoint-driven commits — no custom logic for exactly-once delivery to the table. |
+| **Iceberg 1.10** | Open table format with ACID guarantees, schema evolution, and time travel. Decouples storage from compute — any SQL engine can read the table. |
+| **Nessie** | Git-like catalog branching for the Iceberg table. Locally simulates what Glue or Unity Catalog provide in cloud deployments. |
+| **MinIO** | S3-compatible object storage for local development. Iceberg's `S3FileIO` talks to it identically to real S3. |
+| **HiveMQ CE** | Production-grade MQTT broker (not Mosquitto). CE is free; the protocol layer is identical to Enterprise for basic pub/sub. |
+| **Smooth Gaussian-walk sensor values** | Synthetic data with realistic drift so a downstream anomaly-detection project has a stable baseline to learn against. |
 
-# Iceberg snapshot summary self-reports the same total — no external query engine needed
-```
+## Operational characteristics
 
-## Layout
+| Metric | Observed at M3 |
+|--------|---------------|
+| End-to-end lossless delivery | 57,042 Kafka offsets = 57,042 Iceberg rows (exact match across `kafka-get-offsets`, Iceberg snapshot `total-records`, and `pyarrow` row count) |
+| Checkpoint interval | 30 s (configurable) |
+| Iceberg commit trigger | Every successful Flink checkpoint |
+| Fat jar size | ~151 MB (Iceberg + AWS bundle dominates; slimming deferred) |
+| Simulator throughput | 9 devices × 5 Hz = 45 msgs/s sustained |
 
-| Dir | Purpose |
-|---|---|
+## Repository layout
+
+| Directory | Purpose |
+|-----------|---------|
 | `docker/` | docker-compose stack: HiveMQ, Kafka (KRaft), Schema Registry, MinIO + `minio-init` bootstrap, Nessie, Flink JM+TM |
-| `sample-data/` | Python MQTT sensor simulator + Avro bridge (Confluent SR) — the bridge exists because HiveMQ CE has no native Kafka connector |
-| `flink-jobs/` | Maven module for the Java Flink job. `KafkaToIcebergJob` reads Avro from SR, maps Telemetry → RowData, sinks Parquet to `s3://warehouse/iot/telemetry/` via Nessie catalog |
-| `flink-jobs/src/main/avro/telemetry.avsc` | Single source of truth for the on-the-wire schema — both the bridge and the Flink job read it |
-| `docs/decisions.md` | Running log of non-obvious choices (Iceberg dep dance, KRaft cluster IDs, Avro logical types, checkpoint→commit, etc.) |
-| `docs/progress.md` | Live milestone tracker |
+| `sample-data/` | Python MQTT sensor simulator + Avro bridge (Confluent SR) |
+| `flink-jobs/` | Maven module: `KafkaToIcebergJob` reads Avro from SR, maps to RowData, sinks Parquet via Nessie catalog |
+| `flink-jobs/src/main/avro/telemetry.avsc` | Single source of truth for the on-the-wire schema |
 
-## Why this exists
+## Honest disclaimer
 
-A practical reference for the streaming-lakehouse pattern that's becoming the default for IoT and CDC workloads — open-table format (Iceberg) with a streaming compute engine (Flink) on object storage, queryable from any SQL engine. The deliberate constraints:
+| Feature | Status | Notes |
+|---------|--------|-------|
+| MQTT → Kafka → Flink → Iceberg pipeline | **Real, working** | Verified lossless at 57K rows |
+| Kafka 4 KRaft (no ZooKeeper) | **Real** | Single-node; multi-broker config is documented but not exercised |
+| Iceberg table with Parquet on MinIO | **Real** | Append-only; upsert, schema evolution, and time travel are planned |
+| Avro wire format via Schema Registry | **Real** | Protobuf migration is planned |
+| Sensor simulator | **Illustrative** | Synthetic Gaussian-walk data; not a real device fleet |
+| Healthchecks per service | **Planned** | Services run but `docker compose ps` does not yet report `healthy` |
+| Monitoring (Prometheus + Grafana) | **Planned** | Not yet wired |
+| CI pipeline | **Planned** | No `.github/workflows/` yet |
+| DLQ (dead-letter queue) | **Planned** | Deserialization failures currently crash the job |
 
-- **HiveMQ CE** (not Mosquitto) — matches what shows up in production IoT
-- **Nessie** locally for git-like branching of table state; Glue in AWS deployment
-- **Kafka 4 KRaft** — no ZooKeeper, one less service in the topology
-- **Smooth Gaussian-walked sensor values** so a downstream anomaly-detection project (`iot-anomaly-ml`) has a stable baseline to learn against
+## Roadmap
 
-Decisions and trade-offs as they're made: [docs/decisions.md](docs/decisions.md).
+- **Protobuf wire format** — replace Avro with `proto/telemetry.proto` as schema source of truth
+- **Iceberg upsert + ACID** — equality-delete upsert on `(device_id, ts)`
+- **Schema evolution** — add optional fields, prove backward-compatible reads
+- **Flink state + exactly-once** — RocksDB backend, S3 checkpoints, savepoints
+- **Time travel** — pyiceberg scripts demonstrating snapshot queries
+- **Kafka best practices** — DLQ topic, `acks=all`, idempotent producer, `min.insync.replicas`
+- **Monitoring** — Prometheus + Grafana dashboards for throughput, lag, checkpoint duration
+- **CI** — GitHub Actions with Maven build + Testcontainers integration tests
+
+## License
+
+[MIT](LICENSE)

@@ -1,12 +1,26 @@
+# Build artifacts
 target/
 *.class
 *.jar
+
+# IDE
 .idea/
 *.iml
 .vscode/
+
+# Python
 __pycache__/
 *.pyc
 .venv/
+
+# Secrets
 .env
+
+# Docker volumes (local-only)
 minio-data/
 kafka-data/
+
+# Internal docs — workspace-only, never pushed (Hard Rule 3)
+docs/decisions.md
+docs/progress.md
+docs/USER_GUIDE.md
