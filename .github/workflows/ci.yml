@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+
+      - name: Maven build + compile (includes Protobuf codegen)
+        working-directory: flink-jobs
+        run: mvn clean compile -B
+
+      - name: Maven package (fat jar)
+        working-directory: flink-jobs
+        run: mvn package -DskipTests -B
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install -r sample-data/requirements.txt grpcio-tools
+
+      - name: Generate Python Protobuf stubs
+        run: python3 -m grpc_tools.protoc -I=proto --python_out=sample-data proto/telemetry.proto
+
+      - name: Python syntax check
+        run: python3 -m py_compile sample-data/sensor_simulator.py && python3 -m py_compile sample-data/mqtt_kafka_bridge.py
+
+      - name: Verify proto consistency
+        run: |
+          python3 -c "
+          import sample-data.telemetry_pb2 as pb2 if False else None
+          import importlib, sys
+          sys.path.insert(0, 'sample-data')
+          pb2 = importlib.import_module('telemetry_pb2')
+          msg = pb2.Telemetry(device_id='test', site_id='s1', ts=1000, temperature_c=22.5, humidity_pct=55.0, pressure_hpa=1013.0, vibration_g=0.1, firmware_version='1.0.0')
+          assert msg.device_id == 'test', 'Proto round-trip failed'
+          serialized = msg.SerializeToString()
+          parsed = pb2.Telemetry()
+          parsed.ParseFromString(serialized)
+          assert parsed.temperature_c == 22.5, 'Proto parse failed'
+          print(f'Proto round-trip OK: {len(serialized)} bytes')
+          "

@@ -110,7 +110,9 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | `sample-data/` | Python MQTT sensor simulator + Protobuf bridge (Confluent SR) |
 | `flink-jobs/` | Maven module: `KafkaToIcebergJob` consumes Protobuf from Kafka, maps to RowData, sinks Parquet via Nessie catalog |
 | `proto/telemetry.proto` | Single source of truth for the on-the-wire schema (Protobuf) |
-| `scripts/` | Proto codegen helper (`gen_proto.sh` for Python stubs; Java via Maven) |
+| `scripts/` | Proto codegen, correction emitter, time-travel demo |
+| `.github/workflows/` | CI: Maven build, Protobuf codegen, Python checks |
+| `RUNBOOK.md` | Operational playbook: lifecycle, common ops, troubleshooting |
 
 ## Honest disclaimer
 
@@ -127,14 +129,14 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | DLQ topic | **Real** | `iot.telemetry.dlq` created on boot by `kafka-init`; retention 30 days |
 | Time travel demo | **Real** | `scripts/time_travel_demo.py` queries the table as-of any snapshot via pyiceberg |
 | Monitoring (Prometheus + Grafana) | **Planned** | Not yet wired |
-| CI pipeline | **Planned** | No `.github/workflows/` yet |
+| CI pipeline | **Real** | GitHub Actions: Maven build + Protobuf codegen + Python syntax check + proto round-trip test |
 | DLQ routing in Flink | **Planned** | DLQ topic exists; Flink-side routing of deserialization failures is not yet wired |
 
 ## Roadmap
 
 - **Flink state + exactly-once** — RocksDB backend, S3 checkpoints, savepoints
 - **Monitoring** — Prometheus + Grafana dashboards for throughput, lag, checkpoint duration
-- **CI** — GitHub Actions with Maven build + Testcontainers integration tests
+- **Testcontainers integration tests** — end-to-end test with embedded Kafka + Flink
 
 ## License
 
