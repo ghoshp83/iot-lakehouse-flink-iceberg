@@ -45,10 +45,8 @@ jobs:
       - name: Verify proto consistency
         run: |
           python3 -c "
-          import sample-data.telemetry_pb2 as pb2 if False else None
-          import importlib, sys
-          sys.path.insert(0, 'sample-data')
-          pb2 = importlib.import_module('telemetry_pb2')
+          import sys; sys.path.insert(0, 'sample-data')
+          import telemetry_pb2 as pb2
           msg = pb2.Telemetry(device_id='test', site_id='s1', ts=1000, temperature_c=22.5, humidity_pct=55.0, pressure_hpa=1013.0, vibration_g=0.1, firmware_version='1.0.0')
           assert msg.device_id == 'test', 'Proto round-trip failed'
           serialized = msg.SerializeToString()
