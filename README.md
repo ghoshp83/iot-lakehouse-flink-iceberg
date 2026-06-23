@@ -44,27 +44,22 @@ flowchart LR
 **Prerequisites:** Docker (with Compose), Java 17, Maven, Python 3.10+, `grpcio-tools` (`pip install grpcio-tools`).
 
 ```bash
-# 1. Start the stack (Kafka KRaft self-bootstraps; minio-init creates the warehouse bucket)
+# 1. Start the stack (healthchecks gate start order; kafka-init creates topics; minio-init creates bucket)
 cd docker && docker compose up -d
 
-# 2. Create the Kafka topic
-docker exec kafka kafka-topics \
-  --bootstrap-server localhost:9092 --create --if-not-exists \
-  --topic iot.telemetry --partitions 3 --replication-factor 1
-
-# 3. Build the Flink fat jar (also generates Java Protobuf classes)
+# 2. Build the Flink fat jar (also generates Java Protobuf classes)
 cd ../flink-jobs && MAVEN_OPTS="-Xmx3g" mvn clean package -DskipTests
 
-# 4. Install Python dependencies and generate Protobuf stubs
+# 3. Install Python dependencies and generate Protobuf stubs
 cd ../sample-data && pip install -r requirements.txt
 cd .. && bash scripts/gen_proto.sh
 
-# 5. Start the simulator and bridge (two terminals)
+# 4. Start the simulator and bridge (two terminals)
 cd sample-data
 python3 sensor_simulator.py --rate-hz 5
 python3 mqtt_kafka_bridge.py
 
-# 6. Submit the Flink job
+# 5. Submit the Flink job (append mode; or use KafkaToIcebergUpsertJob for upsert)
 docker cp ../flink-jobs/target/iot-lakehouse-flink-0.1.0-SNAPSHOT.jar \
   docker-flink-jobmanager-1:/tmp/job.jar
 docker exec docker-flink-jobmanager-1 flink run -d /tmp/job.jar
@@ -128,16 +123,16 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | Schema evolution | **Real** | `firmware_version` field added to proto + Iceberg schema; pre-evolution Parquet files still read (null for new column) |
 | Protobuf wire format via Schema Registry | **Real** | `proto/telemetry.proto` is the schema contract; SR handles compatibility |
 | Sensor simulator | **Illustrative** | Synthetic Gaussian-walk data; not a real device fleet |
-| Healthchecks per service | **Planned** | Services run but `docker compose ps` does not yet report `healthy` |
+| Healthchecks per service | **Real** | Every service has `healthcheck:` blocks; `depends_on: condition: service_healthy` ensures start order |
+| DLQ topic | **Real** | `iot.telemetry.dlq` created on boot by `kafka-init`; retention 30 days |
+| Time travel demo | **Real** | `scripts/time_travel_demo.py` queries the table as-of any snapshot via pyiceberg |
 | Monitoring (Prometheus + Grafana) | **Planned** | Not yet wired |
 | CI pipeline | **Planned** | No `.github/workflows/` yet |
-| DLQ (dead-letter queue) | **Planned** | Deserialization failures currently crash the job |
+| DLQ routing in Flink | **Planned** | DLQ topic exists; Flink-side routing of deserialization failures is not yet wired |
 
 ## Roadmap
 
 - **Flink state + exactly-once** — RocksDB backend, S3 checkpoints, savepoints
-- **Time travel** — pyiceberg scripts demonstrating snapshot queries
-- **Kafka best practices** — DLQ topic, `acks=all`, idempotent producer, `min.insync.replicas`
 - **Monitoring** — Prometheus + Grafana dashboards for throughput, lag, checkpoint duration
 - **CI** — GitHub Actions with Maven build + Testcontainers integration tests
 

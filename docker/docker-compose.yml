@@ -1,7 +1,6 @@
 # IoT Lakehouse local stack.
 # Kafka 4 (KRaft, no Zookeeper) + Schema Registry 8.2 (Confluent Platform 8.2 / Apache Kafka 4.2)
 # Flink 2.2 on Java 17. HiveMQ CE for MQTT. MinIO for S3-compatible storage. Nessie as the Iceberg catalog.
-# Start order: kafka (KRaft self-bootstraps) -> schema-registry -> hivemq -> minio -> nessie -> flink
 
 networks:
   lakehouse:
@@ -32,17 +31,32 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
       KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
       KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      # Production-grade defaults (single-node values; multi-broker: raise to 3/2)
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      # Log retention: 7 days, 1 GB per partition
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+      KAFKA_LOG_CLEANUP_POLICY: 'delete'
     volumes:
       - kafka-data:/var/lib/kafka/data
     networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   schema-registry:
     image: confluentinc/cp-schema-registry:8.2.0
-    depends_on: [kafka]
+    depends_on:
+      kafka:
+        condition: service_healthy
     ports:
       - "8081:8081"
     environment:
@@ -50,13 +64,25 @@ services:
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
     networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/subjects > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   hivemq:
     image: hivemq/hivemq-ce:latest
     ports:
       - "1883:1883"   # MQTT
-      - "8000:8000"   # MQTT over WebSocket (HiveMQ CE has no HTTP control center — that's Enterprise only)
+      - "8000:8000"   # MQTT over WebSocket
     networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 1883"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   minio:
     image: minio/minio:latest
@@ -70,12 +96,18 @@ services:
     volumes:
       - minio-data:/data
     networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  # One-shot bucket creation. Iceberg sink writes to s3://warehouse/, so the
-  # bucket must exist before the Flink job runs. Idempotent — `mc mb -p` no-ops if present.
   minio-init:
     image: minio/mc:latest
-    depends_on: [minio]
+    depends_on:
+      minio:
+        condition: service_healthy
     entrypoint: >
       /bin/sh -c "
         until mc alias set local http://minio:9000 admin admin12345; do sleep 1; done;
@@ -90,10 +122,19 @@ services:
     ports:
       - "19120:19120"
     networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:19120/api/v2/config > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   flink-jobmanager:
     image: flink:2.2.0-java17
     command: jobmanager
+    depends_on:
+      kafka:
+        condition: service_healthy
     ports:
       - "8082:8081"   # Flink UI (remapped — HiveMQ uses 8080, SR uses 8081)
     environment:
@@ -101,14 +142,51 @@ services:
         FLINK_PROPERTIES=
         jobmanager.rpc.address: flink-jobmanager
     networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   flink-taskmanager:
     image: flink:2.2.0-java17
     command: taskmanager
-    depends_on: [flink-jobmanager]
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
     environment:
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 4
     networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/taskmanagers > /dev/null || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Topic initialization: creates the main topic + DLQ topic idempotently on boot.
+  kafka-init:
+    image: confluentinc/cp-kafka:8.2.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        echo 'Creating topics...' &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+          --topic iot.telemetry --partitions 3 --replication-factor 1 \
+          --config min.insync.replicas=1 \
+          --config cleanup.policy=delete \
+          --config retention.ms=604800000 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+          --topic iot.telemetry.dlq --partitions 1 --replication-factor 1 \
+          --config cleanup.policy=delete \
+          --config retention.ms=2592000000 &&
+        echo 'Topics ready'
+      "
+    networks: [lakehouse]
+    restart: "no"
