@@ -12,7 +12,7 @@ flowchart LR
 
     subgraph Ingest
         HMQ[HiveMQ CE<br/>MQTT 1883]
-        BR[Python Bridge<br/>Avro + Schema Registry]
+        BR[Python Bridge<br/>Protobuf + Schema Registry]
     end
 
     subgraph Streaming
@@ -29,7 +29,7 @@ flowchart LR
 
     S -->|MQTT| HMQ
     HMQ -->|subscribe| BR
-    BR -->|Avro + key| K
+    BR -->|Protobuf + key| K
     K --- SR
     K -->|consume| FL
     FL -->|checkpoint commit| ICE
@@ -37,11 +37,11 @@ flowchart LR
     ICE -->|Parquet| MINIO
 ```
 
-**Data flow:** Simulated IoT devices publish JSON readings over MQTT to HiveMQ. A Python bridge subscribes, serializes to Avro via Schema Registry, and produces to Kafka (keyed by `device_id`). Flink consumes the Avro stream, maps records to Iceberg RowData, and sinks Parquet files to MinIO through the Nessie catalog. Every Flink checkpoint triggers an Iceberg commit — the table is always consistent.
+**Data flow:** Simulated IoT devices publish JSON readings over MQTT to HiveMQ. A Python bridge subscribes, serializes to Protobuf via Schema Registry, and produces to Kafka (keyed by `device_id`). Flink consumes the Protobuf stream, strips the Confluent wire-format header, parses with the generated Java class, maps records to Iceberg RowData, and sinks Parquet files to MinIO through the Nessie catalog. Every Flink checkpoint triggers an Iceberg commit — the table is always consistent.
 
 ## Run the full pipeline locally
 
-**Prerequisites:** Docker (with Compose), Java 17, Maven, Python 3.10+.
+**Prerequisites:** Docker (with Compose), Java 17, Maven, Python 3.10+, `grpcio-tools` (`pip install grpcio-tools`).
 
 ```bash
 # 1. Start the stack (Kafka KRaft self-bootstraps; minio-init creates the warehouse bucket)
@@ -52,13 +52,15 @@ docker exec kafka kafka-topics \
   --bootstrap-server localhost:9092 --create --if-not-exists \
   --topic iot.telemetry --partitions 3 --replication-factor 1
 
-# 3. Build the Flink fat jar
+# 3. Build the Flink fat jar (also generates Java Protobuf classes)
 cd ../flink-jobs && MAVEN_OPTS="-Xmx3g" mvn clean package -DskipTests
 
-# 4. Install Python dependencies
+# 4. Install Python dependencies and generate Protobuf stubs
 cd ../sample-data && pip install -r requirements.txt
+cd .. && bash scripts/gen_proto.sh
 
 # 5. Start the simulator and bridge (two terminals)
+cd sample-data
 python3 sensor_simulator.py --rate-hz 5
 python3 mqtt_kafka_bridge.py
 
@@ -86,7 +88,8 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | Choice | Rationale |
 |--------|-----------|
 | **Kafka 4 (KRaft)** | No ZooKeeper dependency — single-process combined controller+broker. Simpler ops, matches the direction all new Kafka deployments are heading. |
-| **Confluent Platform 8.2** | Provides Schema Registry + production-grade Kafka images. Avro schema is the single contract between the Python bridge and the Java Flink job. |
+| **Confluent Platform 8.2** | Provides Schema Registry + production-grade Kafka images. The `.proto` file is the single contract between the Python bridge and the Java Flink job. |
+| **Protobuf wire format** | Compact binary encoding, backward-compatible evolution via field numbers, language-neutral codegen. Better fit for IoT than JSON or Avro — smaller payloads and faster serialization. |
 | **Flink 2.2 on Java 17** | Long Term Support release. Native Iceberg sink with checkpoint-driven commits — no custom logic for exactly-once delivery to the table. |
 | **Iceberg 1.10** | Open table format with ACID guarantees, schema evolution, and time travel. Decouples storage from compute — any SQL engine can read the table. |
 | **Nessie** | Git-like catalog branching for the Iceberg table. Locally simulates what Glue or Unity Catalog provide in cloud deployments. |
@@ -109,9 +112,10 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | Directory | Purpose |
 |-----------|---------|
 | `docker/` | docker-compose stack: HiveMQ, Kafka (KRaft), Schema Registry, MinIO + `minio-init` bootstrap, Nessie, Flink JM+TM |
-| `sample-data/` | Python MQTT sensor simulator + Avro bridge (Confluent SR) |
-| `flink-jobs/` | Maven module: `KafkaToIcebergJob` reads Avro from SR, maps to RowData, sinks Parquet via Nessie catalog |
-| `flink-jobs/src/main/avro/telemetry.avsc` | Single source of truth for the on-the-wire schema |
+| `sample-data/` | Python MQTT sensor simulator + Protobuf bridge (Confluent SR) |
+| `flink-jobs/` | Maven module: `KafkaToIcebergJob` consumes Protobuf from Kafka, maps to RowData, sinks Parquet via Nessie catalog |
+| `proto/telemetry.proto` | Single source of truth for the on-the-wire schema (Protobuf) |
+| `scripts/` | Proto codegen helper (`gen_proto.sh` for Python stubs; Java via Maven) |
 
 ## Honest disclaimer
 
@@ -120,7 +124,7 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | MQTT → Kafka → Flink → Iceberg pipeline | **Real, working** | Verified lossless at 57K rows |
 | Kafka 4 KRaft (no ZooKeeper) | **Real** | Single-node; multi-broker config is documented but not exercised |
 | Iceberg table with Parquet on MinIO | **Real** | Append-only; upsert, schema evolution, and time travel are planned |
-| Avro wire format via Schema Registry | **Real** | Protobuf migration is planned |
+| Protobuf wire format via Schema Registry | **Real** | `proto/telemetry.proto` is the schema contract; SR handles compatibility |
 | Sensor simulator | **Illustrative** | Synthetic Gaussian-walk data; not a real device fleet |
 | Healthchecks per service | **Planned** | Services run but `docker compose ps` does not yet report `healthy` |
 | Monitoring (Prometheus + Grafana) | **Planned** | Not yet wired |
@@ -129,7 +133,6 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 
 ## Roadmap
 
-- **Protobuf wire format** — replace Avro with `proto/telemetry.proto` as schema source of truth
 - **Iceberg upsert + ACID** — equality-delete upsert on `(device_id, ts)`
 - **Schema evolution** — add optional fields, prove backward-compatible reads
 - **Flink state + exactly-once** — RocksDB backend, S3 checkpoints, savepoints

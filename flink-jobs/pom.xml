@@ -10,7 +10,7 @@
     <packaging>jar</packaging>
 
     <name>iot-lakehouse-flink</name>
-    <description>Flink jobs for the IoT lakehouse: Kafka (Avro) -> Iceberg on MinIO via Nessie.</description>
+    <description>Flink jobs for the IoT lakehouse: Kafka (Protobuf via Schema Registry) -> Iceberg on MinIO via Nessie.</description>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -19,22 +19,14 @@
 
         <flink.version>2.2.0</flink.version>
         <flink.kafka.connector.version>4.0.1-2.0</flink.kafka.connector.version>
-        <confluent.version>8.2.0</confluent.version>
-        <avro.version>1.11.4</avro.version>
         <iceberg.version>1.10.1</iceberg.version>
+        <protobuf.version>3.25.5</protobuf.version>
         <log4j.version>2.24.1</log4j.version>
         <junit.version>5.11.4</junit.version>
     </properties>
 
-    <repositories>
-        <repository>
-            <id>confluent</id>
-            <url>https://packages.confluent.io/maven/</url>
-        </repository>
-    </repositories>
-
     <dependencies>
-        <!-- Flink core: shipped by the Flink runtime, scope=provided so it isn't shaded into the fat jar -->
+        <!-- Flink core (provided by the Flink runtime) -->
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-streaming-java</artifactId>
@@ -48,9 +40,7 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- Flink Table API: used for RowData/GenericRowData/StringData/TimestampData when feeding the
-             Iceberg sink. flink:2.2.0-java17 image ships flink-table-runtime + flink-table-api-java-uber
-             in /opt/flink/lib, so scope=provided keeps them out of the fat jar. -->
+        <!-- Flink Table API (provided — shipped in the Flink container image) -->
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-table-api-java-bridge</artifactId>
@@ -64,33 +54,21 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- Kafka source/sink: external connector, shaded into the fat jar -->
+        <!-- Kafka connector (external — shaded into the fat jar) -->
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-connector-kafka</artifactId>
             <version>${flink.kafka.connector.version}</version>
         </dependency>
 
-        <!-- Avro + Confluent Schema Registry deserialization -->
+        <!-- Protobuf runtime (for the generated Telemetry class) -->
         <dependency>
-            <groupId>org.apache.flink</groupId>
-            <artifactId>flink-avro</artifactId>
-            <version>${flink.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.flink</groupId>
-            <artifactId>flink-avro-confluent-registry</artifactId>
-            <version>${flink.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.avro</groupId>
-            <artifactId>avro</artifactId>
-            <version>${avro.version}</version>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+            <version>${protobuf.version}</version>
         </dependency>
 
-        <!-- Iceberg sink. iceberg-flink-runtime is the Flink-2.0-ABI uber jar (RowData->Parquet writer +
-             FlinkSink). iceberg-nessie provides the Nessie catalog impl. iceberg-aws-bundle ships
-             S3FileIO + the AWS SDK v2 client used to talk to MinIO over the S3 API. -->
+        <!-- Iceberg sink -->
         <dependency>
             <groupId>org.apache.iceberg</groupId>
             <artifactId>iceberg-flink-runtime-2.0</artifactId>
@@ -107,10 +85,7 @@
             <version>${iceberg.version}</version>
         </dependency>
 
-        <!-- Hadoop Configuration is required by Iceberg's CatalogLoader signature even though our
-             catalog (Nessie + S3FileIO) never touches HDFS. hadoop-common needs hadoop-shaded-guava
-             (Interners) plus its Woodstox + stax2 static-init deps. We exclude only the heaviest
-             transitives that aren't reachable: HDFS, YARN, MapReduce, Kerberos servers, Jersey, etc. -->
+        <!-- Hadoop Configuration required by Iceberg's CatalogLoader -->
         <dependency>
             <groupId>org.apache.hadoop</groupId>
             <artifactId>hadoop-common</artifactId>
@@ -126,7 +101,6 @@
                 <exclusion><groupId>org.apache.curator</groupId><artifactId>*</artifactId></exclusion>
                 <exclusion><groupId>org.apache.kerby</groupId><artifactId>*</artifactId></exclusion>
                 <exclusion><groupId>org.apache.commons</groupId><artifactId>commons-math3</artifactId></exclusion>
-                <exclusion><groupId>com.google.protobuf</groupId><artifactId>protobuf-java</artifactId></exclusion>
                 <exclusion><groupId>com.jcraft</groupId><artifactId>jsch</artifactId></exclusion>
                 <exclusion><groupId>com.google.re2j</groupId><artifactId>re2j</artifactId></exclusion>
                 <exclusion><groupId>dnsjava</groupId><artifactId>dnsjava</artifactId></exclusion>
@@ -134,7 +108,7 @@
             </exclusions>
         </dependency>
 
-        <!-- Logging: Flink container ships log4j2; provided so it isn't shaded -->
+        <!-- Logging (provided — Flink container ships log4j2) -->
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-slf4j-impl</artifactId>
@@ -152,6 +126,13 @@
     </dependencies>
 
     <build>
+        <extensions>
+            <extension>
+                <groupId>kr.motd.maven</groupId>
+                <artifactId>os-maven-plugin</artifactId>
+                <version>1.7.1</version>
+            </extension>
+        </extensions>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -164,21 +145,18 @@
             </plugin>
 
             <plugin>
-                <groupId>org.apache.avro</groupId>
-                <artifactId>avro-maven-plugin</artifactId>
-                <version>${avro.version}</version>
+                <groupId>org.xolstice.maven.plugins</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <version>0.6.1</version>
+                <configuration>
+                    <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
+                    <protoSourceRoot>${project.basedir}/../proto</protoSourceRoot>
+                </configuration>
                 <executions>
                     <execution>
-                        <phase>generate-sources</phase>
                         <goals>
-                            <goal>schema</goal>
+                            <goal>compile</goal>
                         </goals>
-                        <configuration>
-                            <sourceDirectory>${project.basedir}/src/main/avro/</sourceDirectory>
-                            <outputDirectory>${project.build.directory}/generated-sources/avro/</outputDirectory>
-                            <stringType>String</stringType>
-                            <enableDecimalLogicalType>true</enableDecimalLogicalType>
-                        </configuration>
                     </execution>
                 </executions>
             </plugin>

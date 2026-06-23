@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package iotlakehouse;
+
+option java_package = "com.github.ghoshp83.iotlakehouse.proto";
+option java_outer_classname = "TelemetryProto";
+
+message Telemetry {
+  string device_id = 1;
+  string site_id = 2;
+  int64 ts = 3;
+  double temperature_c = 4;
+  double humidity_pct = 5;
+  double pressure_hpa = 6;
+  double vibration_g = 7;
+}

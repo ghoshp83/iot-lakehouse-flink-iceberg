@@ -1,11 +1,10 @@
 package com.github.ghoshp83.iotlakehouse;
 
-import com.github.ghoshp83.iotlakehouse.avro.Telemetry;
+import com.github.ghoshp83.iotlakehouse.proto.TelemetryProto;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
-import org.apache.flink.formats.avro.registry.confluent.ConfluentRegistryAvroDeserializationSchema;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.data.GenericRowData;
@@ -24,15 +23,10 @@ import org.apache.iceberg.flink.TableLoader;
 import org.apache.iceberg.flink.sink.FlinkSink;
 import org.apache.iceberg.types.Types;
 
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * M3 final job: Kafka (Avro via Schema Registry) -> Iceberg table on MinIO via Nessie catalog.
- * <p>
- * Replaces the M3a print sink. Creates the table on first run, then streams Avro records
- * into Parquet files under s3://warehouse/iot/telemetry/.
- */
 public final class KafkaToIcebergJob {
 
     private static final String DB = "iot";
@@ -45,7 +39,6 @@ public final class KafkaToIcebergJob {
         String bootstrap = params.getOrDefault("kafka.bootstrap", "kafka:29092");
         String topic = params.getOrDefault("kafka.topic", "iot.telemetry");
         String groupId = params.getOrDefault("kafka.group", "flink-iot-iceberg");
-        String schemaRegistryUrl = params.getOrDefault("schema.registry.url", "http://schema-registry:8081");
         String nessieUri = params.getOrDefault("nessie.uri", "http://nessie:19120/api/v2");
         String nessieRef = params.getOrDefault("nessie.ref", "main");
         String warehouse = params.getOrDefault("warehouse", "s3://warehouse/");
@@ -62,20 +55,18 @@ public final class KafkaToIcebergJob {
                 catalogLoader, TableIdentifier.of(DB, TABLE));
 
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-        // Checkpointing is what triggers Iceberg commits — without it, files are written
-        // but never committed and the table stays empty. 30 s keeps the demo snappy.
         env.enableCheckpointing(30_000L);
 
-        KafkaSource<Telemetry> source = KafkaSource.<Telemetry>builder()
+        KafkaSource<TelemetryProto.Telemetry> source = KafkaSource
+                .<TelemetryProto.Telemetry>builder()
                 .setBootstrapServers(bootstrap)
                 .setTopics(topic)
                 .setGroupId(groupId)
                 .setStartingOffsets(OffsetsInitializer.earliest())
-                .setValueOnlyDeserializer(
-                        ConfluentRegistryAvroDeserializationSchema.forSpecific(Telemetry.class, schemaRegistryUrl))
+                .setValueOnlyDeserializer(new ConfluentProtobufDeserializer())
                 .build();
 
-        DataStream<Telemetry> stream = env.fromSource(
+        DataStream<TelemetryProto.Telemetry> stream = env.fromSource(
                 source, WatermarkStrategy.noWatermarks(), "kafka-iot-telemetry");
 
         DataStream<RowData> rows = stream
@@ -86,10 +77,9 @@ public final class KafkaToIcebergJob {
                 .tableLoader(tableLoader)
                 .append();
 
-        env.execute("iot-lakehouse-m3-kafka-to-iceberg");
+        env.execute("iot-lakehouse-kafka-to-iceberg");
     }
 
-    /** Iceberg schema mirrors telemetry.avsc field-for-field (timestamps go to timestamptz). */
     private static Schema icebergSchema() {
         return new Schema(
                 Types.NestedField.required(1, "device_id", Types.StringType.get()),
@@ -101,11 +91,11 @@ public final class KafkaToIcebergJob {
                 Types.NestedField.required(7, "vibration_g", Types.DoubleType.get()));
     }
 
-    private static RowData toRowData(Telemetry t) {
+    private static RowData toRowData(TelemetryProto.Telemetry t) {
         GenericRowData row = new GenericRowData(7);
-        row.setField(0, StringData.fromString(t.getDeviceId().toString()));
-        row.setField(1, StringData.fromString(t.getSiteId().toString()));
-        row.setField(2, TimestampData.fromInstant(t.getTs()));
+        row.setField(0, StringData.fromString(t.getDeviceId()));
+        row.setField(1, StringData.fromString(t.getSiteId()));
+        row.setField(2, TimestampData.fromInstant(Instant.ofEpochMilli(t.getTs())));
         row.setField(3, t.getTemperatureC());
         row.setField(4, t.getHumidityPct());
         row.setField(5, t.getPressureHpa());
@@ -126,8 +116,6 @@ public final class KafkaToIcebergJob {
         props.put("s3.secret-access-key", s3Secret);
         props.put("s3.path-style-access", "true");
         props.put("client.region", "us-east-1");
-        // new Configuration(false) skips loading core-default.xml/core-site.xml — those would
-        // require Woodstox on the classpath, which we don't ship. We never touch HDFS anyway.
         return CatalogLoader.custom("nessie", props, new Configuration(false),
                 "org.apache.iceberg.nessie.NessieCatalog");
     }
