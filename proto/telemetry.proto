@@ -13,4 +13,9 @@ message Telemetry {
   double humidity_pct = 5;
   double pressure_hpa = 6;
   double vibration_g = 7;
+  // R4 schema evolution: optional field added after initial deployment.
+  // Pre-evolution records deserialize with firmware_version = "" (proto3 default).
+  // Iceberg table gains the column via addColumn; pre-evolution Parquet files
+  // still read correctly (null for the new column).
+  string firmware_version = 8;
 }

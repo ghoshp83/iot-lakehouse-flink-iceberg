@@ -69,6 +69,7 @@ def main() -> int:
                 humidity_pct=float(payload["humidity_pct"]),
                 pressure_hpa=float(payload["pressure_hpa"]),
                 vibration_g=float(payload["vibration_g"]),
+                firmware_version=payload.get("firmware_version", ""),
             )
             producer.produce(
                 topic=args.kafka_topic,

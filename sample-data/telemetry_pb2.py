@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0ftelemetry.proto\x12\x0ciotlakehouse\"\x93\x01\n\tTelemetry\x12\x11\n\tdevice_id\x18\x01 \x01(\t\x12\x0f\n\x07site_id\x18\x02 \x01(\t\x12\n\n\x02ts\x18\x03 \x01(\x03\x12\x15\n\rtemperature_c\x18\x04 \x01(\x01\x12\x14\n\x0chumidity_pct\x18\x05 \x01(\x01\x12\x14\n\x0cpressure_hpa\x18\x06 \x01(\x01\x12\x13\n\x0bvibration_g\x18\x07 \x01(\x01\x42\x38\n&com.github.ghoshp83.iotlakehouse.protoB\x0eTelemetryProtob\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0ftelemetry.proto\x12\x0ciotlakehouse\"\xad\x01\n\tTelemetry\x12\x11\n\tdevice_id\x18\x01 \x01(\t\x12\x0f\n\x07site_id\x18\x02 \x01(\t\x12\n\n\x02ts\x18\x03 \x01(\x03\x12\x15\n\rtemperature_c\x18\x04 \x01(\x01\x12\x14\n\x0chumidity_pct\x18\x05 \x01(\x01\x12\x14\n\x0cpressure_hpa\x18\x06 \x01(\x01\x12\x13\n\x0bvibration_g\x18\x07 \x01(\x01\x12\x18\n\x10\x66irmware_version\x18\x08 \x01(\tB8\n&com.github.ghoshp83.iotlakehouse.protoB\x0eTelemetryProtob\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,5 +33,5 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'\n&com.github.ghoshp83.iotlakehouse.protoB\016TelemetryProto'
   _globals['_TELEMETRY']._serialized_start=34
-  _globals['_TELEMETRY']._serialized_end=181
+  _globals['_TELEMETRY']._serialized_end=207
 # @@protoc_insertion_point(module_scope)

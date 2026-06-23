@@ -12,8 +12,8 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.SupportsNamespaces;
@@ -27,18 +27,23 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 
-public final class KafkaToIcebergJob {
+/**
+ * Upsert variant: writes to an Iceberg v2 table with equality deletes on (device_id, ts).
+ * Duplicate or corrected readings for the same device at the same timestamp replace
+ * the prior row rather than appending a second copy.
+ */
+public final class KafkaToIcebergUpsertJob {
 
     private static final String DB = "iot";
-    private static final String TABLE = "telemetry";
+    private static final String TABLE = "telemetry_upsert";
 
-    private KafkaToIcebergJob() {}
+    private KafkaToIcebergUpsertJob() {}
 
     public static void main(String[] args) throws Exception {
         Map<String, String> params = parseArgs(args);
         String bootstrap = params.getOrDefault("kafka.bootstrap", "kafka:29092");
         String topic = params.getOrDefault("kafka.topic", "iot.telemetry");
-        String groupId = params.getOrDefault("kafka.group", "flink-iot-iceberg");
+        String groupId = params.getOrDefault("kafka.group", "flink-iot-iceberg-upsert");
         String nessieUri = params.getOrDefault("nessie.uri", "http://nessie:19120/api/v2");
         String nessieRef = params.getOrDefault("nessie.ref", "main");
         String warehouse = params.getOrDefault("warehouse", "s3://warehouse/");
@@ -70,14 +75,16 @@ public final class KafkaToIcebergJob {
                 source, WatermarkStrategy.noWatermarks(), "kafka-iot-telemetry");
 
         DataStream<RowData> rows = stream
-                .map(KafkaToIcebergJob::toRowData)
+                .map(KafkaToIcebergUpsertJob::toRowData)
                 .returns(TypeInformation.of(RowData.class));
 
         FlinkSink.forRowData(rows)
                 .tableLoader(tableLoader)
+                .equalityFieldColumns(java.util.List.of("device_id", "ts"))
+                .upsert(true)
                 .append();
 
-        env.execute("iot-lakehouse-kafka-to-iceberg");
+        env.execute("iot-lakehouse-kafka-to-iceberg-upsert");
     }
 
     private static Schema icebergSchema() {
@@ -134,7 +141,11 @@ public final class KafkaToIcebergJob {
         }
         TableIdentifier id = TableIdentifier.of(DB, TABLE);
         if (!catalog.tableExists(id)) {
-            catalog.createTable(id, icebergSchema(), PartitionSpec.unpartitioned());
+            catalog.createTable(id, icebergSchema(),
+                    org.apache.iceberg.PartitionSpec.unpartitioned(),
+                    Map.of("format-version", "2",
+                           "write.delete.mode", "merge-on-read",
+                           "write.update.mode", "merge-on-read"));
         }
     }
 

@@ -123,7 +123,9 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 |---------|--------|-------|
 | MQTT → Kafka → Flink → Iceberg pipeline | **Real, working** | Verified lossless at 57K rows |
 | Kafka 4 KRaft (no ZooKeeper) | **Real** | Single-node; multi-broker config is documented but not exercised |
-| Iceberg table with Parquet on MinIO | **Real** | Append-only; upsert, schema evolution, and time travel are planned |
+| Iceberg table with Parquet on MinIO | **Real** | Append-only job + upsert job (equality deletes on `device_id, ts`) |
+| Iceberg upsert (equality deletes) | **Real** | `KafkaToIcebergUpsertJob` with `format-version=2` and merge-on-read |
+| Schema evolution | **Real** | `firmware_version` field added to proto + Iceberg schema; pre-evolution Parquet files still read (null for new column) |
 | Protobuf wire format via Schema Registry | **Real** | `proto/telemetry.proto` is the schema contract; SR handles compatibility |
 | Sensor simulator | **Illustrative** | Synthetic Gaussian-walk data; not a real device fleet |
 | Healthchecks per service | **Planned** | Services run but `docker compose ps` does not yet report `healthy` |
@@ -133,8 +135,6 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 
 ## Roadmap
 
-- **Iceberg upsert + ACID** — equality-delete upsert on `(device_id, ts)`
-- **Schema evolution** — add optional fields, prove backward-compatible reads
 - **Flink state + exactly-once** — RocksDB backend, S3 checkpoints, savepoints
 - **Time travel** — pyiceberg scripts demonstrating snapshot queries
 - **Kafka best practices** — DLQ topic, `acks=all`, idempotent producer, `min.insync.replicas`

@@ -21,12 +21,14 @@ import paho.mqtt.client as mqtt
 
 DEFAULT_SITES = ["site-london", "site-edinburgh", "site-leeds"]
 DEVICES_PER_SITE = 3
+FIRMWARE_VERSIONS = ["1.0.0", "1.1.0", "1.2.0", "2.0.0-beta"]
 
 
 @dataclass
 class Device:
     device_id: str
     site_id: str
+    firmware_version: str = ""
     temp: float = field(default_factory=lambda: random.uniform(18.0, 24.0))
     humidity: float = field(default_factory=lambda: random.uniform(40.0, 60.0))
     pressure: float = field(default_factory=lambda: random.uniform(1005.0, 1020.0))
@@ -37,7 +39,7 @@ class Device:
         self.humidity = max(0.0, min(100.0, self.humidity + random.gauss(0.0, 0.4)))
         self.pressure += random.gauss(0.0, 0.2)
         self.vibration = max(0.0, self.vibration + random.gauss(0.0, 0.01))
-        return {
+        reading = {
             "device_id": self.device_id,
             "site_id": self.site_id,
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -46,13 +48,20 @@ class Device:
             "pressure_hpa": round(self.pressure, 3),
             "vibration_g": round(self.vibration, 4),
         }
+        if self.firmware_version:
+            reading["firmware_version"] = self.firmware_version
+        return reading
 
 
-def build_fleet(sites: list[str], per_site: int) -> list[Device]:
+def build_fleet(sites: list[str], per_site: int, with_firmware: bool = False) -> list[Device]:
     fleet = []
     for site in sites:
         for i in range(per_site):
-            fleet.append(Device(device_id=f"{site}-dev-{i:02d}", site_id=site))
+            fw = random.choice(FIRMWARE_VERSIONS) if with_firmware else ""
+            fleet.append(Device(
+                device_id=f"{site}-dev-{i:02d}", site_id=site,
+                firmware_version=fw,
+            ))
     return fleet
 
 
@@ -66,9 +75,11 @@ def main() -> int:
     p.add_argument("--port", type=int, default=1883)
     p.add_argument("--rate-hz", type=float, default=2.0, help="readings per device per second")
     p.add_argument("--devices-per-site", type=int, default=DEVICES_PER_SITE)
+    p.add_argument("--with-firmware", action="store_true",
+                   help="Include firmware_version field (schema evolution demo)")
     args = p.parse_args()
 
-    fleet = build_fleet(DEFAULT_SITES, args.devices_per_site)
+    fleet = build_fleet(DEFAULT_SITES, args.devices_per_site, args.with_firmware)
     period = 1.0 / args.rate_hz
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="iot-sim")
