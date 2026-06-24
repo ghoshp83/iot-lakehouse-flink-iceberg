@@ -2,15 +2,22 @@ package com.github.ghoshp83.iotlakehouse;
 
 import com.github.ghoshp83.iotlakehouse.proto.TelemetryProto;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.connector.base.DeliveryGuarantee;
+import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
+import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
-import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
+import org.apache.flink.util.Collector;
+import org.apache.flink.util.OutputTag;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SortOrder;
@@ -63,32 +70,54 @@ public final class KafkaToIcebergUpsertJob {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.enableCheckpointing(30_000L);
 
-        KafkaSource<TelemetryProto.Telemetry> source = KafkaSource
-                .<TelemetryProto.Telemetry>builder()
+        KafkaSource<DeserializationResult> source = KafkaSource
+                .<DeserializationResult>builder()
                 .setBootstrapServers(bootstrap)
                 .setTopics(topic)
                 .setGroupId(groupId)
                 .setStartingOffsets(OffsetsInitializer.earliest())
-                .setValueOnlyDeserializer(new ConfluentProtobufDeserializer())
+                .setValueOnlyDeserializer(new DlqProtobufDeserializer())
                 .setProperty("isolation.level", "read_committed")
                 .build();
 
-        WatermarkStrategy<TelemetryProto.Telemetry> watermarks = WatermarkStrategy
-                .<TelemetryProto.Telemetry>forBoundedOutOfOrderness(Duration.ofSeconds(5))
-                .withTimestampAssigner((event, recordTs) -> event.getTs());
+        WatermarkStrategy<DeserializationResult> watermarks = WatermarkStrategy
+                .<DeserializationResult>forBoundedOutOfOrderness(Duration.ofSeconds(5))
+                .withTimestampAssigner((r, recordTs) ->
+                        r.isSuccess() ? r.getTelemetry().getTs() : recordTs);
 
-        DataStream<TelemetryProto.Telemetry> stream = env.fromSource(
-                source, watermarks, "kafka-iot-telemetry");
+        OutputTag<String> dlqTag = new OutputTag<>("dlq",
+                TypeInformation.of(String.class));
 
-        DataStream<RowData> rows = stream
-                .map(KafkaToIcebergUpsertJob::toRowData)
-                .returns(TypeInformation.of(RowData.class));
+        SingleOutputStreamOperator<RowData> rows = env
+                .fromSource(source, watermarks, "kafka-iot-telemetry")
+                .process(new ProcessFunction<DeserializationResult, RowData>() {
+                    @Override
+                    public void processElement(DeserializationResult value,
+                            Context ctx, Collector<RowData> out) {
+                        if (value.isSuccess()) {
+                            out.collect(toRowData(value.getTelemetry()));
+                        } else {
+                            ctx.output(dlqTag, value.getError());
+                        }
+                    }
+                });
 
         FlinkSink.forRowData(rows)
                 .tableLoader(tableLoader)
                 .equalityFieldColumns(java.util.List.of("device_id", "ts"))
                 .upsert(true)
                 .append();
+
+        KafkaSink<String> dlqSink = KafkaSink.<String>builder()
+                .setBootstrapServers(bootstrap)
+                .setRecordSerializer(
+                        KafkaRecordSerializationSchema.builder()
+                                .setTopic("iot.telemetry.dlq")
+                                .setValueSerializationSchema(new SimpleStringSchema())
+                                .build())
+                .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+                .build();
+        rows.getSideOutput(dlqTag).sinkTo(dlqSink);
 
         env.execute("iot-lakehouse-kafka-to-iceberg-upsert");
     }

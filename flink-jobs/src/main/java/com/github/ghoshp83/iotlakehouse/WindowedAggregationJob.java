@@ -2,22 +2,20 @@ package com.github.ghoshp83.iotlakehouse;
 
 import com.github.ghoshp83.iotlakehouse.proto.TelemetryProto;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
-import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.connector.base.DeliveryGuarantee;
-import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
-import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.ProcessFunction;
+import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.util.Collector;
-import org.apache.flink.util.OutputTag;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
@@ -35,18 +33,18 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 
-public final class KafkaToIcebergJob {
+public final class WindowedAggregationJob {
 
     private static final String DB = "iot";
-    private static final String TABLE = "telemetry";
+    private static final String TABLE = "telemetry_1m_agg";
 
-    private KafkaToIcebergJob() {}
+    private WindowedAggregationJob() {}
 
     public static void main(String[] args) throws Exception {
         Map<String, String> params = parseArgs(args);
         String bootstrap = params.getOrDefault("kafka.bootstrap", "kafka:29092");
         String topic = params.getOrDefault("kafka.topic", "iot.telemetry");
-        String groupId = params.getOrDefault("kafka.group", "flink-iot-iceberg");
+        String groupId = params.getOrDefault("kafka.group", "flink-iot-windowed-agg");
         String nessieUri = params.getOrDefault("nessie.uri", "http://nessie:19120/api/v2");
         String nessieRef = params.getOrDefault("nessie.ref", "main");
         String warehouse = params.getOrDefault("warehouse", "s3://warehouse/");
@@ -80,69 +78,101 @@ public final class KafkaToIcebergJob {
                 .withTimestampAssigner((r, recordTs) ->
                         r.isSuccess() ? r.getTelemetry().getTs() : recordTs);
 
-        OutputTag<String> dlqTag = new OutputTag<>("dlq",
-                TypeInformation.of(String.class));
-
-        SingleOutputStreamOperator<RowData> rows = env
+        SingleOutputStreamOperator<RowData> aggregated = env
                 .fromSource(source, watermarks, "kafka-iot-telemetry")
-                .process(new ProcessFunction<DeserializationResult, RowData>() {
-                    @Override
-                    public void processElement(DeserializationResult value,
-                            Context ctx, Collector<RowData> out) {
-                        if (value.isSuccess()) {
-                            out.collect(toRowData(value.getTelemetry()));
-                        } else {
-                            ctx.output(dlqTag, value.getError());
-                        }
-                    }
-                });
+                .filter(DeserializationResult::isSuccess)
+                .map(r -> r.getTelemetry())
+                .returns(TypeInformation.of(TelemetryProto.Telemetry.class))
+                .keyBy(TelemetryProto.Telemetry::getDeviceId)
+                .window(TumblingEventTimeWindows.of(Duration.ofMinutes(1)))
+                .aggregate(new TelemetryAggregator(), new AggToRowData());
 
-        FlinkSink.forRowData(rows)
+        FlinkSink.forRowData(aggregated)
                 .tableLoader(tableLoader)
                 .append();
 
-        KafkaSink<String> dlqSink = KafkaSink.<String>builder()
-                .setBootstrapServers(bootstrap)
-                .setRecordSerializer(
-                        KafkaRecordSerializationSchema.builder()
-                                .setTopic("iot.telemetry.dlq")
-                                .setValueSerializationSchema(new SimpleStringSchema())
-                                .build())
-                .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
-                .build();
-        rows.getSideOutput(dlqTag).sinkTo(dlqSink);
-
-        env.execute("iot-lakehouse-kafka-to-iceberg");
+        env.execute("iot-lakehouse-windowed-aggregation-1m");
     }
 
     private static Schema icebergSchema() {
         return new Schema(
                 Types.NestedField.required(1, "device_id", Types.StringType.get()),
-                Types.NestedField.required(2, "site_id", Types.StringType.get()),
-                Types.NestedField.required(3, "ts", Types.TimestampType.withZone()),
-                Types.NestedField.required(4, "temperature_c", Types.DoubleType.get()),
-                Types.NestedField.required(5, "humidity_pct", Types.DoubleType.get()),
-                Types.NestedField.required(6, "pressure_hpa", Types.DoubleType.get()),
-                Types.NestedField.required(7, "vibration_g", Types.DoubleType.get()),
-                Types.NestedField.optional(8, "firmware_version", Types.StringType.get()));
+                Types.NestedField.required(2, "window_start", Types.TimestampType.withZone()),
+                Types.NestedField.required(3, "window_end", Types.TimestampType.withZone()),
+                Types.NestedField.required(4, "reading_count", Types.LongType.get()),
+                Types.NestedField.required(5, "avg_temperature_c", Types.DoubleType.get()),
+                Types.NestedField.required(6, "min_temperature_c", Types.DoubleType.get()),
+                Types.NestedField.required(7, "max_temperature_c", Types.DoubleType.get()),
+                Types.NestedField.required(8, "avg_humidity_pct", Types.DoubleType.get()),
+                Types.NestedField.required(9, "avg_pressure_hpa", Types.DoubleType.get()));
     }
 
-    private static RowData toRowData(TelemetryProto.Telemetry t) {
-        GenericRowData row = new GenericRowData(8);
-        row.setField(0, StringData.fromString(t.getDeviceId()));
-        row.setField(1, StringData.fromString(t.getSiteId()));
-        row.setField(2, TimestampData.fromInstant(Instant.ofEpochMilli(t.getTs())));
-        row.setField(3, t.getTemperatureC());
-        row.setField(4, t.getHumidityPct());
-        row.setField(5, t.getPressureHpa());
-        row.setField(6, t.getVibrationG());
-        String fw = t.getFirmwareVersion();
-        row.setField(7, fw.isEmpty() ? null : StringData.fromString(fw));
-        return row;
+    static class Accumulator {
+        String deviceId;
+        long count;
+        double sumTemp, minTemp = Double.MAX_VALUE, maxTemp = -Double.MAX_VALUE;
+        double sumHumidity, sumPressure;
+    }
+
+    private static class TelemetryAggregator
+            implements AggregateFunction<TelemetryProto.Telemetry, Accumulator, Accumulator> {
+
+        @Override
+        public Accumulator createAccumulator() { return new Accumulator(); }
+
+        @Override
+        public Accumulator add(TelemetryProto.Telemetry v, Accumulator a) {
+            a.deviceId = v.getDeviceId();
+            a.count++;
+            a.sumTemp += v.getTemperatureC();
+            a.minTemp = Math.min(a.minTemp, v.getTemperatureC());
+            a.maxTemp = Math.max(a.maxTemp, v.getTemperatureC());
+            a.sumHumidity += v.getHumidityPct();
+            a.sumPressure += v.getPressureHpa();
+            return a;
+        }
+
+        @Override
+        public Accumulator getResult(Accumulator a) { return a; }
+
+        @Override
+        public Accumulator merge(Accumulator a, Accumulator b) {
+            a.count += b.count;
+            a.sumTemp += b.sumTemp;
+            a.minTemp = Math.min(a.minTemp, b.minTemp);
+            a.maxTemp = Math.max(a.maxTemp, b.maxTemp);
+            a.sumHumidity += b.sumHumidity;
+            a.sumPressure += b.sumPressure;
+            return a;
+        }
+    }
+
+    private static class AggToRowData
+            extends ProcessWindowFunction<Accumulator, RowData, String, TimeWindow> {
+
+        @Override
+        public void process(String key, Context ctx,
+                Iterable<Accumulator> elements, Collector<RowData> out) {
+            Accumulator a = elements.iterator().next();
+            GenericRowData row = new GenericRowData(9);
+            row.setField(0, StringData.fromString(a.deviceId));
+            row.setField(1, TimestampData.fromInstant(
+                    Instant.ofEpochMilli(ctx.window().getStart())));
+            row.setField(2, TimestampData.fromInstant(
+                    Instant.ofEpochMilli(ctx.window().getEnd())));
+            row.setField(3, a.count);
+            row.setField(4, a.sumTemp / a.count);
+            row.setField(5, a.minTemp);
+            row.setField(6, a.maxTemp);
+            row.setField(7, a.sumHumidity / a.count);
+            row.setField(8, a.sumPressure / a.count);
+            out.collect(row);
+        }
     }
 
     private static CatalogLoader nessieCatalogLoader(
-            String uri, String ref, String warehouse, String s3Endpoint, String s3Key, String s3Secret) {
+            String uri, String ref, String warehouse, String s3Endpoint,
+            String s3Key, String s3Secret) {
         Map<String, String> props = new HashMap<>();
         props.put("catalog-impl", "org.apache.iceberg.nessie.NessieCatalog");
         props.put("uri", uri);

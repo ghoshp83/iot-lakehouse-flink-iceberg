@@ -88,6 +88,23 @@ docker exec docker-flink-jobmanager-1 flink run -d \
   -s s3://warehouse/flink-savepoints/<savepoint-dir> /tmp/job.jar
 ```
 
+### Submit Flink windowed aggregation job
+```bash
+docker exec docker-flink-jobmanager-1 flink run -d \
+  -c com.github.ghoshp83.iotlakehouse.WindowedAggregationJob /tmp/job.jar
+```
+
+### Query Iceberg tables via Trino
+```bash
+docker exec docker-trino-1 trino --catalog iceberg --schema iot \
+  --execute "SELECT * FROM telemetry LIMIT 10"
+```
+
+### Run Trino demo queries
+```bash
+bash scripts/trino_demo.sh
+```
+
 ### Full savepoint demo (create → cancel → restore)
 ```bash
 bash scripts/savepoint_demo.sh
@@ -133,3 +150,4 @@ curl -s http://localhost:9090/api/v1/targets | python3 -m json.tool
 | Kafka Exporter | 9308 | Kafka metrics for Prometheus |
 | Prometheus | 9090 | Metrics storage + query |
 | Grafana | 3000 | Dashboards (admin/admin) |
+| Trino | 8083 | SQL query engine (remapped from 8080) |

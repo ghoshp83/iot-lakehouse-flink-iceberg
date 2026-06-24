@@ -24,6 +24,10 @@ jobs:
         working-directory: flink-jobs
         run: mvn clean compile -B
 
+      - name: Maven test (unit tests — integration tests excluded)
+        working-directory: flink-jobs
+        run: mvn test -B -Dtest='!*IT'
+
       - name: Maven package (fat jar)
         working-directory: flink-jobs
         run: mvn package -DskipTests -B

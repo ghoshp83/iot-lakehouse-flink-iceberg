@@ -253,6 +253,25 @@ services:
       retries: 5
       start_period: 15s
 
+  trino:
+    image: trinodb/trino:latest
+    depends_on:
+      nessie:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "8083:8080"
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "trino --execute 'SELECT 1' > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
   # --- Init services ---
 
   # Topic initialization: creates the main topic + DLQ topic idempotently on boot.

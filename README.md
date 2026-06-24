@@ -127,6 +127,7 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | `scripts/` | Proto codegen, correction emitter, time-travel demo, savepoint demo |
 | `docker/prometheus/` | Prometheus scrape configuration |
 | `docker/grafana/` | Grafana provisioning (datasource, dashboards) |
+| `docker/trino/` | Trino Iceberg catalog config (Nessie + MinIO) |
 | `.github/workflows/` | CI: Maven build, Protobuf codegen, Python checks |
 | `RUNBOOK.md` | Operational playbook: lifecycle, common ops, troubleshooting |
 
@@ -148,7 +149,10 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | RocksDB state backend | **Real** | S3-backed checkpoints and savepoints on MinIO; externalized retention on cancellation |
 | Event-time watermarks | **Real** | 5 s bounded out-of-orderness; `read_committed` Kafka isolation for exactly-once |
 | CI pipeline | **Real** | GitHub Actions: Maven build + Protobuf codegen + Python syntax check + proto round-trip test |
-| DLQ routing in Flink | **Planned** | DLQ topic exists; Flink-side routing of deserialization failures is not yet wired |
+| DLQ routing in Flink | **Real** | `DlqProtobufDeserializer` catches failures; `ProcessFunction` routes errors to `iot.telemetry.dlq` via side output + `KafkaSink` |
+| Windowed aggregations | **Real** | `WindowedAggregationJob`: 1-minute tumbling event-time windows, per-device stats (avg/min/max temp, avg humidity/pressure) → `iot.telemetry_1m_agg` Iceberg table |
+| Trino SQL query layer | **Real** | Trino container with Iceberg connector via Nessie catalog; query any Iceberg table including metadata (snapshots, history) |
+| Testcontainers tests | **Real** | Unit tests for deserializer + DLQ path; integration test with Kafka Testcontainer for end-to-end round-trip |
 
 ## Monitoring
 
@@ -169,10 +173,33 @@ bash scripts/savepoint_demo.sh
 
 This triggers a savepoint, cancels the running job, then restores it — Kafka consumption resumes from the exact offset captured in the savepoint.
 
+## Trino SQL
+
+Trino provides a SQL query layer over the Iceberg tables. Once the stack is running with data:
+
+- **Trino UI:** [http://localhost:8083](http://localhost:8083)
+- **Demo queries:** `bash scripts/trino_demo.sh`
+
+```bash
+# Ad-hoc query (after docker compose up)
+docker exec docker-trino-1 trino --catalog iceberg --schema iot \
+  --execute "SELECT device_id, COUNT(*) FROM telemetry GROUP BY device_id"
+```
+
+## Windowed aggregations
+
+`WindowedAggregationJob` computes 1-minute tumbling-window statistics per device (avg/min/max temperature, avg humidity, avg pressure) and writes to the `iot.telemetry_1m_agg` Iceberg table.
+
+```bash
+# Submit the windowed aggregation job
+docker exec docker-flink-jobmanager-1 flink run -d \
+  -c com.github.ghoshp83.iotlakehouse.WindowedAggregationJob /tmp/job.jar
+```
+
 ## Roadmap
 
-- **Testcontainers integration tests** — end-to-end test with embedded Kafka + Flink
-- **DLQ routing in Flink** — route deserialization failures to the DLQ topic
+- **Multi-broker Kafka cluster** — scale beyond single-node for partition rebalancing
+- **Helm / Kubernetes manifests** — production deployment
 
 ## License
 
