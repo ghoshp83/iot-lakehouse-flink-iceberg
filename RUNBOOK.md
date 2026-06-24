@@ -76,6 +76,33 @@ docker exec docker-flink-jobmanager-1 flink list
 docker exec docker-flink-jobmanager-1 flink cancel <job-id>
 ```
 
+### Trigger a Flink savepoint
+```bash
+docker exec docker-flink-jobmanager-1 flink savepoint <job-id> \
+  s3://warehouse/flink-savepoints
+```
+
+### Restore from a savepoint
+```bash
+docker exec docker-flink-jobmanager-1 flink run -d \
+  -s s3://warehouse/flink-savepoints/<savepoint-dir> /tmp/job.jar
+```
+
+### Full savepoint demo (create → cancel → restore)
+```bash
+bash scripts/savepoint_demo.sh
+```
+
+### Open monitoring dashboards
+- **Grafana:** http://localhost:3000 (admin / admin, or anonymous viewer)
+- **Prometheus:** http://localhost:9090
+- **Flink UI:** http://localhost:8082
+
+### Check Prometheus targets
+```bash
+curl -s http://localhost:9090/api/v1/targets | python3 -m json.tool
+```
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -86,6 +113,9 @@ docker exec docker-flink-jobmanager-1 flink cancel <job-id>
 | Iceberg table has 0 rows | Checkpointing not enabled | Verify `env.enableCheckpointing(30_000L)` in the job |
 | MinIO `NoSuchBucket` | `minio-init` didn't run | Check `docker logs docker-minio-init-1`; run `mc mb -p local/warehouse` manually |
 | `ClassNotFoundException` in Flink | Dependency missing from fat jar | Check `mvn dependency:tree` and shade plugin config |
+| Prometheus target DOWN for Flink | Metrics plugin not loaded | Verify `ENABLE_BUILT_IN_PLUGINS` includes `flink-metrics-prometheus-2.2.0.jar` |
+| Grafana shows "No data" | No Flink job running or Prometheus not scraping | Check Prometheus targets at `:9090/targets`; ensure a Flink job is submitted |
+| Savepoint fails | S3 plugin not loaded or MinIO unreachable | Verify `ENABLE_BUILT_IN_PLUGINS` includes `flink-s3-fs-hadoop-2.2.0.jar` |
 
 ## Ports
 
@@ -99,3 +129,7 @@ docker exec docker-flink-jobmanager-1 flink cancel <job-id>
 | MinIO | 9001 | Console UI |
 | Nessie | 19120 | REST API |
 | Flink UI | 8082 | Web dashboard (remapped from 8081) |
+| Flink Prometheus | 9249 | Metrics endpoint |
+| Kafka Exporter | 9308 | Kafka metrics for Prometheus |
+| Prometheus | 9090 | Metrics storage + query |
+| Grafana | 3000 | Dashboards (admin/admin) |

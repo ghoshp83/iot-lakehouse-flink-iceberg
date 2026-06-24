@@ -23,6 +23,7 @@ import org.apache.iceberg.flink.TableLoader;
 import org.apache.iceberg.flink.sink.FlinkSink;
 import org.apache.iceberg.types.Types;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
@@ -64,10 +65,15 @@ public final class KafkaToIcebergJob {
                 .setGroupId(groupId)
                 .setStartingOffsets(OffsetsInitializer.earliest())
                 .setValueOnlyDeserializer(new ConfluentProtobufDeserializer())
+                .setProperty("isolation.level", "read_committed")
                 .build();
 
+        WatermarkStrategy<TelemetryProto.Telemetry> watermarks = WatermarkStrategy
+                .<TelemetryProto.Telemetry>forBoundedOutOfOrderness(Duration.ofSeconds(5))
+                .withTimestampAssigner((event, recordTs) -> event.getTs());
+
         DataStream<TelemetryProto.Telemetry> stream = env.fromSource(
-                source, WatermarkStrategy.noWatermarks(), "kafka-iot-telemetry");
+                source, watermarks, "kafka-iot-telemetry");
 
         DataStream<RowData> rows = stream
                 .map(KafkaToIcebergJob::toRowData)

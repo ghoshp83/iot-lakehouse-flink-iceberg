@@ -18,13 +18,19 @@ flowchart LR
     subgraph Streaming
         K[Kafka 4<br/>KRaft · 3 partitions]
         SR[Schema Registry<br/>Confluent 8.2]
-        FL[Flink 2.2<br/>Java 17]
+        FL[Flink 2.2<br/>Java 17<br/>RocksDB state]
     end
 
     subgraph Lakehouse
         ICE[Iceberg 1.10<br/>Parquet files]
         NES[Nessie Catalog<br/>Git-like branching]
         MINIO[MinIO<br/>S3-compatible]
+    end
+
+    subgraph Monitoring
+        KE[Kafka Exporter]
+        PROM[Prometheus]
+        GRAF[Grafana]
     end
 
     S -->|MQTT| HMQ
@@ -35,9 +41,13 @@ flowchart LR
     FL -->|checkpoint commit| ICE
     ICE --- NES
     ICE -->|Parquet| MINIO
+    K -.->|metrics| KE
+    FL -.->|metrics| PROM
+    KE -.->|scrape| PROM
+    PROM -.->|query| GRAF
 ```
 
-**Data flow:** Simulated IoT devices publish JSON readings over MQTT to HiveMQ. A Python bridge subscribes, serializes to Protobuf via Schema Registry, and produces to Kafka (keyed by `device_id`). Flink consumes the Protobuf stream, strips the Confluent wire-format header, parses with the generated Java class, maps records to Iceberg RowData, and sinks Parquet files to MinIO through the Nessie catalog. Every Flink checkpoint triggers an Iceberg commit — the table is always consistent.
+**Data flow:** Simulated IoT devices publish JSON readings over MQTT to HiveMQ. A Python bridge subscribes, serializes to Protobuf via Schema Registry, and produces to Kafka (keyed by `device_id`). Flink consumes the Protobuf stream with `read_committed` isolation and event-time watermarks, strips the Confluent wire-format header, parses with the generated Java class, maps records to Iceberg RowData, and sinks Parquet files to MinIO through the Nessie catalog. State is managed by RocksDB with S3-backed checkpoints — every successful checkpoint triggers an Iceberg commit, giving exactly-once delivery to the table. Prometheus scrapes Flink and Kafka metrics; Grafana provides pre-provisioned dashboards for lag, throughput, and checkpoint health.
 
 ## Run the full pipeline locally
 
@@ -85,7 +95,7 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | **Kafka 4 (KRaft)** | No ZooKeeper dependency — single-process combined controller+broker. Simpler ops, matches the direction all new Kafka deployments are heading. |
 | **Confluent Platform 8.2** | Provides Schema Registry + production-grade Kafka images. The `.proto` file is the single contract between the Python bridge and the Java Flink job. |
 | **Protobuf wire format** | Compact binary encoding, backward-compatible evolution via field numbers, language-neutral codegen. Better fit for IoT than JSON or Avro — smaller payloads and faster serialization. |
-| **Flink 2.2 on Java 17** | Long Term Support release. Native Iceberg sink with checkpoint-driven commits — no custom logic for exactly-once delivery to the table. |
+| **Flink 2.2 on Java 17** | Long Term Support release. Native Iceberg sink with checkpoint-driven commits — no custom logic for exactly-once delivery to the table. RocksDB state backend with S3-backed checkpoints enables savepoints and zero-data-loss recovery. |
 | **Iceberg 1.10** | Open table format with ACID guarantees, schema evolution, and time travel. Decouples storage from compute — any SQL engine can read the table. |
 | **Nessie** | Git-like catalog branching for the Iceberg table. Locally simulates what Glue or Unity Catalog provide in cloud deployments. |
 | **MinIO** | S3-compatible object storage for local development. Iceberg's `S3FileIO` talks to it identically to real S3. |
@@ -97,7 +107,11 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | Metric | Observed at M3 |
 |--------|---------------|
 | End-to-end lossless delivery | 57,042 Kafka offsets = 57,042 Iceberg rows (exact match across `kafka-get-offsets`, Iceberg snapshot `total-records`, and `pyarrow` row count) |
-| Checkpoint interval | 30 s (configurable) |
+| Checkpoint interval | 30 s (configurable), min pause 10 s |
+| State backend | RocksDB with S3-backed checkpoints (MinIO) |
+| Checkpoint retention | Retained on cancellation — supports savepoint/restore |
+| Kafka consumer isolation | `read_committed` (exactly-once end-to-end) |
+| Event-time watermarks | Bounded out-of-orderness, 5 s tolerance |
 | Iceberg commit trigger | Every successful Flink checkpoint |
 | Fat jar size | ~151 MB (Iceberg + AWS bundle dominates; slimming deferred) |
 | Simulator throughput | 9 devices × 5 Hz = 45 msgs/s sustained |
@@ -110,7 +124,9 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | `sample-data/` | Python MQTT sensor simulator + Protobuf bridge (Confluent SR) |
 | `flink-jobs/` | Maven module: `KafkaToIcebergJob` consumes Protobuf from Kafka, maps to RowData, sinks Parquet via Nessie catalog |
 | `proto/telemetry.proto` | Single source of truth for the on-the-wire schema (Protobuf) |
-| `scripts/` | Proto codegen, correction emitter, time-travel demo |
+| `scripts/` | Proto codegen, correction emitter, time-travel demo, savepoint demo |
+| `docker/prometheus/` | Prometheus scrape configuration |
+| `docker/grafana/` | Grafana provisioning (datasource, dashboards) |
 | `.github/workflows/` | CI: Maven build, Protobuf codegen, Python checks |
 | `RUNBOOK.md` | Operational playbook: lifecycle, common ops, troubleshooting |
 
@@ -128,15 +144,35 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | Healthchecks per service | **Real** | Every service has `healthcheck:` blocks; `depends_on: condition: service_healthy` ensures start order |
 | DLQ topic | **Real** | `iot.telemetry.dlq` created on boot by `kafka-init`; retention 30 days |
 | Time travel demo | **Real** | `scripts/time_travel_demo.py` queries the table as-of any snapshot via pyiceberg |
-| Monitoring (Prometheus + Grafana) | **Planned** | Not yet wired |
+| Monitoring (Prometheus + Grafana) | **Real** | Pre-provisioned dashboard: consumer lag, throughput, checkpoint duration/size, job uptime. Kafka Exporter scrapes broker metrics |
+| RocksDB state backend | **Real** | S3-backed checkpoints and savepoints on MinIO; externalized retention on cancellation |
+| Event-time watermarks | **Real** | 5 s bounded out-of-orderness; `read_committed` Kafka isolation for exactly-once |
 | CI pipeline | **Real** | GitHub Actions: Maven build + Protobuf codegen + Python syntax check + proto round-trip test |
 | DLQ routing in Flink | **Planned** | DLQ topic exists; Flink-side routing of deserialization failures is not yet wired |
 
+## Monitoring
+
+The stack includes Prometheus + Grafana with a pre-provisioned dashboard. Once the stack is running:
+
+- **Grafana:** [http://localhost:3000](http://localhost:3000) (admin / admin, or anonymous read-only)
+- **Prometheus:** [http://localhost:9090](http://localhost:9090)
+
+The dashboard ("IoT Lakehouse") shows: Kafka consumer group lag, message throughput, Flink checkpoint duration and size, completed checkpoint count, broker count, and job uptime.
+
+## Savepoints
+
+Flink checkpoints are stored on S3 (MinIO) via RocksDB. To create and restore from a savepoint:
+
+```bash
+bash scripts/savepoint_demo.sh
+```
+
+This triggers a savepoint, cancels the running job, then restores it — Kafka consumption resumes from the exact offset captured in the savepoint.
+
 ## Roadmap
 
-- **Flink state + exactly-once** — RocksDB backend, S3 checkpoints, savepoints
-- **Monitoring** — Prometheus + Grafana dashboards for throughput, lag, checkpoint duration
 - **Testcontainers integration tests** — end-to-end test with embedded Kafka + Flink
+- **DLQ routing in Flink** — route deserialization failures to the DLQ topic
 
 ## License
 

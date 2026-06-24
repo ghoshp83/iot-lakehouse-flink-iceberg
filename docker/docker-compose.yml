@@ -137,10 +137,24 @@ services:
         condition: service_healthy
     ports:
       - "8082:8081"   # Flink UI (remapped — HiveMQ uses 8080, SR uses 8081)
+      - "9249:9249"   # Prometheus metrics
     environment:
+      - ENABLE_BUILT_IN_PLUGINS=flink-s3-fs-hadoop-2.2.0.jar;flink-metrics-prometheus-2.2.0.jar
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: flink-jobmanager
+        state.backend.type: rocksdb
+        state.checkpoints.dir: s3://warehouse/flink-checkpoints/
+        state.savepoints.dir: s3://warehouse/flink-savepoints/
+        execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+        execution.checkpointing.min-pause: 10s
+        execution.checkpointing.tolerable-failed-checkpoints: 3
+        s3.endpoint: http://minio:9000
+        s3.access-key: admin
+        s3.secret-key: admin12345
+        s3.path.style.access: true
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
     networks: [lakehouse]
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview > /dev/null"]
@@ -156,10 +170,23 @@ services:
       flink-jobmanager:
         condition: service_healthy
     environment:
+      - ENABLE_BUILT_IN_PLUGINS=flink-s3-fs-hadoop-2.2.0.jar;flink-metrics-prometheus-2.2.0.jar
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 4
+        state.backend.type: rocksdb
+        state.checkpoints.dir: s3://warehouse/flink-checkpoints/
+        state.savepoints.dir: s3://warehouse/flink-savepoints/
+        execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+        execution.checkpointing.min-pause: 10s
+        execution.checkpointing.tolerable-failed-checkpoints: 3
+        s3.endpoint: http://minio:9000
+        s3.access-key: admin
+        s3.secret-key: admin12345
+        s3.path.style.access: true
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
     networks: [lakehouse]
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8081/taskmanagers > /dev/null || exit 0"]
@@ -167,6 +194,66 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  # --- Monitoring stack ---
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    command: --kafka.server=kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "9308:9308"
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9308/metrics > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      kafka-exporter:
+        condition: service_healthy
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    networks: [lakehouse]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # --- Init services ---
 
   # Topic initialization: creates the main topic + DLQ topic idempotently on boot.
   kafka-init:
