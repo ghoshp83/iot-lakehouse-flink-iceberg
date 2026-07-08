@@ -70,7 +70,7 @@ python3 sensor_simulator.py --rate-hz 5
 python3 mqtt_kafka_bridge.py
 
 # 5. Submit the Flink job (append mode; or use KafkaToIcebergUpsertJob for upsert)
-docker cp ../flink-jobs/target/iot-lakehouse-flink-0.1.0-SNAPSHOT.jar \
+docker cp ../flink-jobs/target/iot-lakehouse-flink-0.2.0.jar \
   docker-flink-jobmanager-1:/tmp/job.jar
 docker exec docker-flink-jobmanager-1 flink run -d /tmp/job.jar
 ```
@@ -153,6 +153,10 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | Windowed aggregations | **Real** | `WindowedAggregationJob`: 1-minute tumbling event-time windows, per-device stats (avg/min/max temp, avg humidity/pressure) → `iot.telemetry_1m_agg` Iceberg table |
 | Trino SQL query layer | **Real** | Trino container with Iceberg connector via Nessie catalog; query any Iceberg table including metadata (snapshots, history) |
 | Testcontainers tests | **Real** | Unit tests for deserializer + DLQ path; integration test with Kafka Testcontainer for end-to-end round-trip |
+| Hidden day partitioning | **Real** | `IcebergPartitions.byEventDay` — `day(ts)` on the telemetry tables, `day(window_start)` on the aggregate. Applies to tables the jobs create; unit-tested (`IcebergPartitionsTest`) |
+| Data-quality gate | **Real** | `TelemetryValidator` bounds-checks every decoded reading (temp/humidity/pressure/vibration + finite/id/ts); out-of-range readings routed to the DLQ. Unit-tested (`TelemetryValidatorTest`) |
+| Structured DLQ records | **Real** | `DlqEnvelope` writes JSON `{stage, reason, …}` (deserialize vs validate), JSON-escaped so records stay parseable. Unit-tested (`DlqEnvelopeTest`) |
+| Iceberg maintenance | **Real** | `scripts/maintenance.sql` — Trino `ALTER TABLE … EXECUTE optimize / expire_snapshots / remove_orphan_files` across all three tables. Operator-run against the live stack (`scripts/maintenance_demo.sh`) |
 
 ## Monitoring
 
