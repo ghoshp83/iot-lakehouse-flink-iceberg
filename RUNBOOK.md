@@ -110,6 +110,22 @@ bash scripts/trino_demo.sh
 bash scripts/savepoint_demo.sh
 ```
 
+### Iceberg table maintenance (compaction / snapshot expiry / orphan removal)
+Streaming writers commit a fresh set of data files on every checkpoint (~30s),
+so tables accumulate many small Parquet files and a long snapshot chain. Run
+maintenance on a schedule (e.g. hourly compaction, daily expiry):
+```bash
+# Before/after demo — prints the data-file count around compaction
+bash scripts/maintenance_demo.sh
+
+# Or apply directly
+docker exec -i docker-trino-1 trino --catalog iceberg --schema iot \
+  < scripts/maintenance.sql
+```
+Retention thresholds default to Trino's 7-day floor; to expire more aggressively,
+raise `iceberg.expire-snapshots.min-retention` /
+`iceberg.remove-orphan-files.min-retention` in `docker/trino/catalog/iceberg.properties`.
+
 ### Open monitoring dashboards
 - **Grafana:** http://localhost:3000 (admin / admin, or anonymous viewer)
 - **Prometheus:** http://localhost:9090
