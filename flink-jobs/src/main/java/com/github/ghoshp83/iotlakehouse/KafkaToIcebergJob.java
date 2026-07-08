@@ -89,12 +89,14 @@ public final class KafkaToIcebergJob {
                     public void processElement(DeserializationResult value,
                             Context ctx, Collector<RowData> out) {
                         if (!value.isSuccess()) {
-                            ctx.output(dlqTag, value.getError());
+                            ctx.output(dlqTag, DlqEnvelope.forParseFailure(
+                                    value.getError(), value.getFailedPayload()));
                             return;
                         }
                         String reason = TelemetryValidator.validate(value.getTelemetry());
                         if (reason != null) {
-                            ctx.output(dlqTag, reason);
+                            ctx.output(dlqTag, DlqEnvelope.forValidationFailure(
+                                    reason, value.getTelemetry().getDeviceId()));
                         } else {
                             out.collect(toRowData(value.getTelemetry()));
                         }
