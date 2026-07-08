@@ -176,8 +176,9 @@ public final class KafkaToIcebergUpsertJob {
         }
         TableIdentifier id = TableIdentifier.of(DB, TABLE);
         if (!catalog.tableExists(id)) {
-            catalog.createTable(id, icebergSchema(),
-                    org.apache.iceberg.PartitionSpec.unpartitioned(),
+            Schema schema = icebergSchema();
+            catalog.createTable(id, schema,
+                    IcebergPartitions.byEventDay(schema, "ts"),
                     Map.of("format-version", "2",
                            "write.delete.mode", "merge-on-read",
                            "write.update.mode", "merge-on-read"));

@@ -17,7 +17,6 @@ import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.util.Collector;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.Namespace;
@@ -199,7 +198,8 @@ public final class WindowedAggregationJob {
         }
         TableIdentifier id = TableIdentifier.of(DB, TABLE);
         if (!catalog.tableExists(id)) {
-            catalog.createTable(id, icebergSchema(), PartitionSpec.unpartitioned());
+            Schema schema = icebergSchema();
+            catalog.createTable(id, schema, IcebergPartitions.byEventDay(schema, "window_start"));
         }
     }
 
