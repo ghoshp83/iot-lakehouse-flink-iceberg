@@ -126,6 +126,26 @@ Retention thresholds default to Trino's 7-day floor; to expire more aggressively
 raise `iceberg.expire-snapshots.min-retention` /
 `iceberg.remove-orphan-files.min-retention` in `docker/trino/catalog/iceberg.properties`.
 
+### Roll back a bad commit (Iceberg snapshot rollback)
+Every checkpoint commit is an atomic snapshot, so a bad deploy or a poisoned
+batch can be undone by moving the table's current-snapshot pointer back — no
+data files are rewritten, and the bad snapshot stays inspectable (and
+roll-forward-able) until snapshot expiry removes it:
+```bash
+# Before/after demo — rolls telemetry back one snapshot
+bash scripts/rollback_demo.sh
+
+# Or to a specific snapshot id (list them first)
+docker exec docker-trino-1 trino --catalog iceberg --schema iot \
+  --execute "SELECT snapshot_id, committed_at, operation FROM \"telemetry\$snapshots\" ORDER BY committed_at DESC"
+docker exec docker-trino-1 trino --catalog iceberg --schema iot \
+  --execute "CALL iceberg.system.rollback_to_snapshot('iot', 'telemetry', <snapshot_id>)"
+```
+Stop (or savepoint-and-cancel) the writer job first: a running job's next
+checkpoint commits on top of whatever snapshot is current. Note that rollback
+undoes *table state*, not Kafka offsets — replaying the dropped events is the
+writer's job after you restore it from an earlier savepoint.
+
 ### Open monitoring dashboards
 - **Grafana:** http://localhost:3000 (admin / admin, or anonymous viewer)
 - **Prometheus:** http://localhost:9090
