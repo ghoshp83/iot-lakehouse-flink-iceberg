@@ -77,8 +77,11 @@ public final class KafkaToIcebergUpsertJob {
                 .setProperty("isolation.level", "read_committed")
                 .build();
 
+        // withIdleness: an idle Kafka partition must not stall the combined
+        // watermark for downstream event-time consumers of this pipeline.
         WatermarkStrategy<DeserializationResult> watermarks = WatermarkStrategy
                 .<DeserializationResult>forBoundedOutOfOrderness(Duration.ofSeconds(5))
+                .withIdleness(Duration.ofMinutes(1))
                 .withTimestampAssigner((r, recordTs) ->
                         r.isSuccess() ? r.getTelemetry().getTs() : recordTs);
 

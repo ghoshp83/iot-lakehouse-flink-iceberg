@@ -30,6 +30,16 @@ class DlqEnvelopeTest {
     }
 
     @Test
+    void lateEventCarriesStageDeviceAndEventTime() {
+        // The event timestamp is what an operator needs to decide whether a late
+        // reading is worth replaying through the upsert corrections path.
+        String json = DlqEnvelope.forLateEvent("sensor-3", 1_700_000_000_000L);
+        assertTrue(json.contains("\"stage\":\"late\""), json);
+        assertTrue(json.contains("\"device_id\":\"sensor-3\""), json);
+        assertTrue(json.contains("\"event_ts\":1700000000000"), json);
+    }
+
+    @Test
     void escapesQuotesAndControlCharsSoTheRecordStaysValidJson() {
         // A raw exception message can contain quotes and newlines; unescaped they
         // would break the JSON record and make the DLQ unparseable.

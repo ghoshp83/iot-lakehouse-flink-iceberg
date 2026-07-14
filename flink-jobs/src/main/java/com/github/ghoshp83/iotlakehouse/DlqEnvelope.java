@@ -31,6 +31,17 @@ public final class DlqEnvelope {
                 + str("reason", reason) + "}";
     }
 
+    /**
+     * A valid reading that arrived after its event-time window had already
+     * closed and been written, so including it would require rewriting an
+     * emitted aggregate.
+     */
+    public static String forLateEvent(String deviceId, long eventTsMillis) {
+        return "{" + str("stage", "late") + ","
+                + str("device_id", deviceId) + ","
+                + num("event_ts", eventTsMillis) + "}";
+    }
+
     private static String str(String key, String value) {
         return quote(key) + ":" + quote(value);
     }

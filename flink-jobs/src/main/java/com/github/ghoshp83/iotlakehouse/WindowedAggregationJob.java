@@ -4,6 +4,7 @@ import com.github.ghoshp83.iotlakehouse.proto.TelemetryProto;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
@@ -19,6 +20,7 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.OutputTag;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.catalog.Catalog;
@@ -75,8 +77,12 @@ public final class WindowedAggregationJob {
                 .setProperty("isolation.level", "read_committed")
                 .build();
 
+        // withIdleness: a Kafka partition with no traffic (dead device, skewed
+        // keying) would otherwise hold back the combined watermark and no window
+        // downstream would ever fire.
         WatermarkStrategy<DeserializationResult> watermarks = WatermarkStrategy
                 .<DeserializationResult>forBoundedOutOfOrderness(Duration.ofSeconds(5))
+                .withIdleness(Duration.ofMinutes(1))
                 .withTimestampAssigner((r, recordTs) ->
                         r.isSuccess() ? r.getTelemetry().getTs() : recordTs);
 
@@ -88,9 +94,17 @@ public final class WindowedAggregationJob {
                 .fromSource(source, watermarks, "kafka-iot-telemetry")
                 .process(new TelemetryRouter());
 
+        // Late events are side-output rather than given an allowedLateness: the
+        // sink is an append-only Iceberg table, so a re-fired window would append
+        // a second row for the same (device, window) instead of updating it.
+        // Late readings surface on the DLQ topic for the corrections path.
+        OutputTag<TelemetryProto.Telemetry> lateTag = new OutputTag<>("late",
+                TypeInformation.of(TelemetryProto.Telemetry.class));
+
         SingleOutputStreamOperator<RowData> aggregated = validTelemetry
                 .keyBy(TelemetryProto.Telemetry::getDeviceId)
                 .window(TumblingEventTimeWindows.of(Duration.ofMinutes(1)))
+                .sideOutputLateData(lateTag)
                 .aggregate(new TelemetryAggregator(), new AggToRowData());
 
         FlinkSink.forRowData(aggregated)
@@ -107,6 +121,11 @@ public final class WindowedAggregationJob {
                 .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
                 .build();
         validTelemetry.getSideOutput(TelemetryRouter.DLQ_TAG).sinkTo(dlqSink);
+
+        aggregated.getSideOutput(lateTag)
+                .map(t -> DlqEnvelope.forLateEvent(t.getDeviceId(), t.getTs()))
+                .returns(TypeInformation.of(String.class))
+                .sinkTo(dlqSink);
 
         env.execute("iot-lakehouse-windowed-aggregation-1m");
     }
