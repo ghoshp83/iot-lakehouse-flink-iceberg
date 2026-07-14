@@ -70,7 +70,7 @@ python3 sensor_simulator.py --rate-hz 5
 python3 mqtt_kafka_bridge.py
 
 # 5. Submit the Flink job (append mode; or use KafkaToIcebergUpsertJob for upsert)
-docker cp ../flink-jobs/target/iot-lakehouse-flink-0.2.0.jar \
+docker cp ../flink-jobs/target/iot-lakehouse-flink-0.3.0.jar \
   docker-flink-jobmanager-1:/tmp/job.jar
 docker exec docker-flink-jobmanager-1 flink run -d /tmp/job.jar
 ```
@@ -124,7 +124,7 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | `sample-data/` | Python MQTT sensor simulator + Protobuf bridge (Confluent SR) |
 | `flink-jobs/` | Maven module: `KafkaToIcebergJob` consumes Protobuf from Kafka, maps to RowData, sinks Parquet via Nessie catalog |
 | `proto/telemetry.proto` | Single source of truth for the on-the-wire schema (Protobuf) |
-| `scripts/` | Proto codegen, correction emitter, time-travel demo, savepoint demo |
+| `scripts/` | Proto codegen, correction emitter, time-travel / savepoint / maintenance / rollback demos |
 | `docker/prometheus/` | Prometheus scrape configuration |
 | `docker/grafana/` | Grafana provisioning (datasource, dashboards) |
 | `docker/trino/` | Trino Iceberg catalog config (Nessie + MinIO) |
@@ -157,6 +157,11 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 | Data-quality gate | **Real** | `TelemetryValidator` bounds-checks every decoded reading (temp/humidity/pressure/vibration + finite/id/ts); out-of-range readings routed to the DLQ. Unit-tested (`TelemetryValidatorTest`) |
 | Structured DLQ records | **Real** | `DlqEnvelope` writes JSON `{stage, reason, …}` (deserialize vs validate), JSON-escaped so records stay parseable. Unit-tested (`DlqEnvelopeTest`) |
 | Iceberg maintenance | **Real** | `scripts/maintenance.sql` — Trino `ALTER TABLE … EXECUTE optimize / expire_snapshots / remove_orphan_files` across all three tables. Operator-run against the live stack (`scripts/maintenance_demo.sh`) |
+| Per-job DQ metrics | **Real** | `TelemetryRouter` counters (`records_valid` / `records_parse_failed` / `records_validation_failed`) per job in the Flink UI + Prometheus. Routing logic unit-tested (`TelemetryRouterTest`); counter wiring compile-verified |
+| DQ gate on aggregates | **Real** | The aggregation job routes through the same `TelemetryRouter` gate and DLQ as the writer jobs — out-of-range readings can no longer skew per-minute averages |
+| Late-event dead-lettering | **Real** | Window side output wraps late readings as `stage=late` DLQ records (`DlqEnvelope.forLateEvent`, unit-tested); no `allowedLateness` by design (append-only sink would duplicate window rows) |
+| Idle-source watermarks | **Real** | `withIdleness(1 min)` on all three jobs so an idle Kafka partition cannot stall the watermark; behaviour is Flink-native, configuration compile-verified |
+| Snapshot rollback | **Real** | `scripts/rollback_demo.sh` + RUNBOOK — Trino `rollback_to_snapshot` moves the table pointer back without rewriting data. Operator-run against the live stack |
 
 ## Monitoring
 

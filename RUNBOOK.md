@@ -53,14 +53,14 @@ docker run --rm --network docker_lakehouse --entrypoint sh minio/mc:latest -c \
 
 ### Submit Flink job (append mode)
 ```bash
-docker cp flink-jobs/target/iot-lakehouse-flink-0.2.0.jar \
+docker cp flink-jobs/target/iot-lakehouse-flink-0.3.0.jar \
   docker-flink-jobmanager-1:/tmp/job.jar
 docker exec docker-flink-jobmanager-1 flink run -d /tmp/job.jar
 ```
 
 ### Submit Flink job (upsert mode)
 ```bash
-docker cp flink-jobs/target/iot-lakehouse-flink-0.2.0.jar \
+docker cp flink-jobs/target/iot-lakehouse-flink-0.3.0.jar \
   docker-flink-jobmanager-1:/tmp/job.jar
 docker exec docker-flink-jobmanager-1 flink run -d \
   -c com.github.ghoshp83.iotlakehouse.KafkaToIcebergUpsertJob /tmp/job.jar
