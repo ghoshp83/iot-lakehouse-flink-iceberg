@@ -3,7 +3,10 @@ package com.github.ghoshp83.iotlakehouse;
 import com.github.ghoshp83.iotlakehouse.proto.TelemetryProto;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.AggregateFunction;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.connector.base.DeliveryGuarantee;
+import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
+import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
@@ -77,11 +80,15 @@ public final class WindowedAggregationJob {
                 .withTimestampAssigner((r, recordTs) ->
                         r.isSuccess() ? r.getTelemetry().getTs() : recordTs);
 
-        SingleOutputStreamOperator<RowData> aggregated = env
+        // Route through the same gate as the append/upsert jobs: previously this
+        // job aggregated readings that the other jobs reject (a 9000 degree stuck
+        // sensor still polluted every per-minute average) and dropped parse
+        // failures without a trace.
+        SingleOutputStreamOperator<TelemetryProto.Telemetry> validTelemetry = env
                 .fromSource(source, watermarks, "kafka-iot-telemetry")
-                .filter(DeserializationResult::isSuccess)
-                .map(r -> r.getTelemetry())
-                .returns(TypeInformation.of(TelemetryProto.Telemetry.class))
+                .process(new TelemetryRouter());
+
+        SingleOutputStreamOperator<RowData> aggregated = validTelemetry
                 .keyBy(TelemetryProto.Telemetry::getDeviceId)
                 .window(TumblingEventTimeWindows.of(Duration.ofMinutes(1)))
                 .aggregate(new TelemetryAggregator(), new AggToRowData());
@@ -89,6 +96,17 @@ public final class WindowedAggregationJob {
         FlinkSink.forRowData(aggregated)
                 .tableLoader(tableLoader)
                 .append();
+
+        KafkaSink<String> dlqSink = KafkaSink.<String>builder()
+                .setBootstrapServers(bootstrap)
+                .setRecordSerializer(
+                        KafkaRecordSerializationSchema.builder()
+                                .setTopic("iot.telemetry.dlq")
+                                .setValueSerializationSchema(new SimpleStringSchema())
+                                .build())
+                .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+                .build();
+        validTelemetry.getSideOutput(TelemetryRouter.DLQ_TAG).sinkTo(dlqSink);
 
         env.execute("iot-lakehouse-windowed-aggregation-1m");
     }
