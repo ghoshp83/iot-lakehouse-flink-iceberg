@@ -11,13 +11,10 @@ import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
-import org.apache.flink.util.Collector;
-import org.apache.flink.util.OutputTag;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SortOrder;
@@ -85,29 +82,13 @@ public final class KafkaToIcebergUpsertJob {
                 .withTimestampAssigner((r, recordTs) ->
                         r.isSuccess() ? r.getTelemetry().getTs() : recordTs);
 
-        OutputTag<String> dlqTag = new OutputTag<>("dlq",
-                TypeInformation.of(String.class));
-
-        SingleOutputStreamOperator<RowData> rows = env
+        SingleOutputStreamOperator<TelemetryProto.Telemetry> validTelemetry = env
                 .fromSource(source, watermarks, "kafka-iot-telemetry")
-                .process(new ProcessFunction<DeserializationResult, RowData>() {
-                    @Override
-                    public void processElement(DeserializationResult value,
-                            Context ctx, Collector<RowData> out) {
-                        if (!value.isSuccess()) {
-                            ctx.output(dlqTag, DlqEnvelope.forParseFailure(
-                                    value.getError(), value.getFailedPayload()));
-                            return;
-                        }
-                        String reason = TelemetryValidator.validate(value.getTelemetry());
-                        if (reason != null) {
-                            ctx.output(dlqTag, DlqEnvelope.forValidationFailure(
-                                    reason, value.getTelemetry().getDeviceId()));
-                        } else {
-                            out.collect(toRowData(value.getTelemetry()));
-                        }
-                    }
-                });
+                .process(new TelemetryRouter());
+
+        SingleOutputStreamOperator<RowData> rows = validTelemetry
+                .map(KafkaToIcebergUpsertJob::toRowData)
+                .returns(TypeInformation.of(RowData.class));
 
         FlinkSink.forRowData(rows)
                 .tableLoader(tableLoader)
@@ -124,7 +105,7 @@ public final class KafkaToIcebergUpsertJob {
                                 .build())
                 .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
                 .build();
-        rows.getSideOutput(dlqTag).sinkTo(dlqSink);
+        validTelemetry.getSideOutput(TelemetryRouter.DLQ_TAG).sinkTo(dlqSink);
 
         env.execute("iot-lakehouse-kafka-to-iceberg-upsert");
     }
